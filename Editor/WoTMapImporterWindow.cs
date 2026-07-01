@@ -28,6 +28,8 @@ namespace WoTMapImporter.Editor
         private bool _loadTerrain = true;
         private bool _loadObjects = true;
         private bool _loadVegetation = true;
+        private bool _loadFlora = true;
+        private float _floraDensity = 0.25f;
         private bool _loadNormals = true;
         private bool _loadWetness = false;
         private int _maxResolution = 4097;
@@ -55,6 +57,8 @@ namespace WoTMapImporter.Editor
             _loadTerrain = EditorPrefs.GetBool("WoTMapImporter.loadTerrain", _loadTerrain);
             _loadObjects = EditorPrefs.GetBool("WoTMapImporter.loadObjects", _loadObjects);
             _loadVegetation = EditorPrefs.GetBool("WoTMapImporter.loadVegetation", _loadVegetation);
+            _loadFlora = EditorPrefs.GetBool("WoTMapImporter.loadFlora", _loadFlora);
+            _floraDensity = EditorPrefs.GetFloat("WoTMapImporter.floraDensity", _floraDensity);
             _terrainMode = (WoTMapImporter.TerrainImportMode)EditorPrefs.GetInt("WoTMapImporter.terrainMode", (int)_terrainMode);
         }
 
@@ -65,6 +69,8 @@ namespace WoTMapImporter.Editor
             EditorPrefs.SetBool("WoTMapImporter.loadTerrain", _loadTerrain);
             EditorPrefs.SetBool("WoTMapImporter.loadObjects", _loadObjects);
             EditorPrefs.SetBool("WoTMapImporter.loadVegetation", _loadVegetation);
+            EditorPrefs.SetBool("WoTMapImporter.loadFlora", _loadFlora);
+            EditorPrefs.SetFloat("WoTMapImporter.floraDensity", _floraDensity);
             EditorPrefs.SetInt("WoTMapImporter.terrainMode", (int)_terrainMode);
         }
 
@@ -105,6 +111,9 @@ namespace WoTMapImporter.Editor
             _loadTerrain = EditorGUILayout.Toggle("Import terrain", _loadTerrain);
             _loadObjects = EditorGUILayout.Toggle("Load static objects", _loadObjects);
             _loadVegetation = EditorGUILayout.Toggle("Load SpeedTree vegetation", _loadVegetation);
+            _loadFlora = EditorGUILayout.Toggle("Load ground flora/grass", _loadFlora);
+            using (new EditorGUI.DisabledScope(!_loadFlora))
+                _floraDensity = EditorGUILayout.Slider("Flora density (per m²)", _floraDensity, 0.02f, 2f);
             using (new EditorGUI.DisabledScope(!_loadTerrain))
             {
                 _loadNormals = EditorGUILayout.Toggle("Load terrain normals", _loadNormals);
@@ -316,6 +325,8 @@ namespace WoTMapImporter.Editor
                     LoadTerrain = _loadTerrain,
                     LoadObjects = _loadObjects,
                     LoadVegetation = _loadVegetation,
+                    LoadFlora = _loadFlora,
+                    FloraDensity = _floraDensity,
                     LoadNormals = _loadNormals,
                     LoadWetness = _loadWetness,
                     MaxHeightmapResolution = _maxResolution,
