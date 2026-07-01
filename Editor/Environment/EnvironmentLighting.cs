@@ -8,7 +8,7 @@ using WoTMapImporter.Editor.Image;
 using WoTMapImporter.Editor.Package;
 using WoTMapImporter.Editor.Xml;
 
-namespace WoTMapImporter.Editor.Environment
+namespace WoTMapImporter.Editor.EnvLighting
 {
     /// <summary>
     /// Parses a WoT/BigWorld sky environment file (system/data/sky&lt;map&gt;.xml,

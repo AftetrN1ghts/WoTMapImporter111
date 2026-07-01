@@ -6,7 +6,7 @@ using System.Linq;
 using UnityEditor;
 using UnityEngine;
 using WoTMapImporter.Editor.Data;
-using WoTMapImporter.Editor.Environment;
+using WoTMapImporter.Editor.EnvLighting;
 using WoTMapImporter.Editor.Package;
 using WoTMapImporter.Editor.Terrain;
 using WoTMapImporter.Editor.Vegetation;
