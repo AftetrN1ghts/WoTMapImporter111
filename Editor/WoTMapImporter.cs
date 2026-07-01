@@ -46,6 +46,7 @@ namespace WoTMapImporter.Editor
             public bool LoadNormals = true;
             public bool LoadWetness = false;
             public int MaxHeightmapResolution = 4097;
+            public int TerrainBakeResolution = 2048;
             public TerrainImportMode TerrainMode = TerrainImportMode.MeshChunks;
         }
 
@@ -143,7 +144,8 @@ namespace WoTMapImporter.Editor
                     if (settings.TerrainMode == TerrainImportMode.MeshChunks)
                     {
                         var meshResult = TerrainMeshBuilder.Build(folder, mapInfo, universalTerrain, chunks, pkgMgr,
-                                                                  settings.LoadWetness);
+                                                                  settings.LoadWetness, settings.LoadNormals,
+                                                                  settings.TerrainBakeResolution);
                         terrainObject = meshResult.TerrainObject;
                         result.Warnings.AddRange(meshResult.Warnings);
                     }

@@ -35,6 +35,7 @@ namespace WoTMapImporter.Editor
         private bool _loadNormals = true;
         private bool _loadWetness = false;
         private int _maxResolution = 4097;
+        private int _terrainBakeResolution = 2048;
         private WoTMapImporter.TerrainImportMode _terrainMode = WoTMapImporter.TerrainImportMode.MeshChunks;
         private bool _mapsParsed;
         private Vector2 _scroll;
@@ -64,6 +65,7 @@ namespace WoTMapImporter.Editor
             _floraGpuInstancing = EditorPrefs.GetBool("WoTMapImporter.floraGpuInstancing", _floraGpuInstancing);
             _floraDrawDistance = EditorPrefs.GetFloat("WoTMapImporter.floraDrawDistance", _floraDrawDistance);
             _terrainMode = (WoTMapImporter.TerrainImportMode)EditorPrefs.GetInt("WoTMapImporter.terrainMode", (int)_terrainMode);
+            _terrainBakeResolution = EditorPrefs.GetInt("WoTMapImporter.terrainBakeResolution", _terrainBakeResolution);
         }
 
         private void OnDisable()
@@ -78,6 +80,7 @@ namespace WoTMapImporter.Editor
             EditorPrefs.SetBool("WoTMapImporter.floraGpuInstancing", _floraGpuInstancing);
             EditorPrefs.SetFloat("WoTMapImporter.floraDrawDistance", _floraDrawDistance);
             EditorPrefs.SetInt("WoTMapImporter.terrainMode", (int)_terrainMode);
+            EditorPrefs.SetInt("WoTMapImporter.terrainBakeResolution", _terrainBakeResolution);
         }
 
         private void OnGUI()
@@ -142,6 +145,14 @@ namespace WoTMapImporter.Editor
                         _maxResolution,
                         new[] { "1025", "2049", "4097" },
                         new[] { 1025, 2049, 4097 });
+                }
+                using (new EditorGUI.DisabledScope(_terrainMode != WoTMapImporter.TerrainImportMode.MeshChunks))
+                {
+                    _terrainBakeResolution = EditorGUILayout.IntPopup(
+                        "Terrain bake resolution",
+                        _terrainBakeResolution,
+                        new[] { "512", "1024", "2048", "4096" },
+                        new[] { 512, 1024, 2048, 4096 });
                 }
             }
             if (!_loadTerrain)
@@ -348,6 +359,7 @@ namespace WoTMapImporter.Editor
                     LoadNormals = _loadNormals,
                     LoadWetness = _loadWetness,
                     MaxHeightmapResolution = _maxResolution,
+                    TerrainBakeResolution = _terrainBakeResolution,
                     TerrainMode = _terrainMode,
                 };
 

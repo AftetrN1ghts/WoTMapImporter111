@@ -39,8 +39,12 @@ namespace WoTMapImporter.Editor.Terrain
             UniversalTerrain terrain,
             List<TerrainChunk> chunks,
             WoTPackageManager resMgr,
-            bool loadWetness)
+            bool loadWetness,
+            bool loadNormals = true,
+            int bakeResolution = 2048)
         {
+            // Keep the baked albedo a sane power-of-two; guards against silly UI values.
+            bakeResolution = Mathf.Clamp(Mathf.ClosestPowerOfTwo(bakeResolution), 512, 4096);
             _globalTextureCache.Clear();
             _globalSamplerCache.Clear();
 
@@ -113,7 +117,7 @@ namespace WoTMapImporter.Editor.Terrain
                     mesh = AssetDatabase.LoadAssetAtPath<UnityMesh>(meshPath) ?? mesh;
 
                     Material mat = BuildBakedChunkMaterial(shader, outputPath, mapInfo.Name, terrain, chunk, resMgr, globalMap,
-                                                       uvMinX, uvMaxX, uvMinY, uvMaxY);
+                                                       uvMinX, uvMaxX, uvMinY, uvMaxY, loadNormals, bakeResolution);
 
                     var go = new GameObject(chunk.ChunkName + "_TerrainMesh");
                     go.transform.position = new Vector3(chunk.ChunkPos.x, 0f, chunk.ChunkPos.y);
@@ -235,7 +239,9 @@ namespace WoTMapImporter.Editor.Terrain
             int uvMinX,
             int uvMaxX,
             int uvMinY,
-            int uvMaxY)
+            int uvMaxY,
+            bool loadNormals,
+            int bakeResolution)
         {
             int layerCount = Mathf.Min(chunk.Layers.Count, 16);
             var layerTextures = new Texture2D[layerCount];
@@ -250,13 +256,16 @@ namespace WoTMapImporter.Editor.Terrain
                 else missing++;
             }
 
-            Texture2D baked = BakeChunkAlbedo(chunk, terrain.ChunkSize, layerTextures, layerMap, 1024, uvMinX, uvMaxX, uvMinY, uvMaxY);
+            Texture2D baked = BakeChunkAlbedo(chunk, terrain.ChunkSize, layerTextures, layerMap, bakeResolution, uvMinX, uvMaxX, uvMinY, uvMaxY);
             baked.name = SafeAssetName(mapName + "_" + chunk.ChunkName + "_baked_albedo");
             string texPath = outputPath + "/BakedChunks/" + baked.name + ".asset";
             SaveAsset(baked, texPath);
             baked = AssetDatabase.LoadAssetAtPath<Texture2D>(texPath) ?? baked;
             baked.wrapMode = TextureWrapMode.Clamp;
-            baked.filterMode = FilterMode.Bilinear;
+            // Trilinear + anisotropy removes the up-close blur and the distance
+            // shimmer the old bilinear/no-mip baked chunks had.
+            baked.filterMode = FilterMode.Trilinear;
+            baked.anisoLevel = 8;
 
             Material mat;
             if (shader != null) mat = new Material(shader);
@@ -271,12 +280,48 @@ namespace WoTMapImporter.Editor.Terrain
             mat.SetFloat("_UVFlipX", 0f);
             mat.SetFloat("_UVFlipY", 0f);
 
+            // Feed the WoT per-chunk normals (terrain2/normals in the .cdata) into the
+            // shader so the terrain actually gets surface detail instead of a flat
+            // "bump" default.  Previously this texture was decoded but never assigned.
+            if (loadNormals && chunk.NormalsTex != null)
+            {
+                var nrm = PersistChunkNormal(chunk.NormalsTex, outputPath, mapName, chunk.ChunkName);
+                if (nrm != null)
+                {
+                    mat.SetTexture("_NormalMap", nrm);
+                    mat.SetTexture("_BumpMap", nrm); // URP/Lit fallback
+                    mat.EnableKeyword("_NORMALMAP");
+                    mat.SetFloat("_NormalStrength", 1f);
+                }
+            }
+
             string matPath = outputPath + "/Materials/" + mat.name + ".mat";
             SaveAsset(mat, matPath);
             var persistedMat = AssetDatabase.LoadAssetAtPath<Material>(matPath) ?? mat;
 
             WoTLogger.Info($"Chunk {chunk.ChunkName}: BAKED mesh material {baked.width}x{baked.height}, layers={layerCount}, textures loaded={loaded}, missing={missing}, blends={chunk.BlendTextures?.Count ?? 0}, newFmt={chunk.IsNewBlendFormat}");
             return persistedMat;
+        }
+
+        // Persists the per-chunk WoT normal texture (decoded from terrain2/normals)
+        // as an asset with mipmaps/anisotropy so the baked terrain shader can sample it.
+        private static Texture2D PersistChunkNormal(Texture2D src, string outputPath, string mapName, string chunkName)
+        {
+            if (src == null) return null;
+
+            var tex = new Texture2D(src.width, src.height, TextureFormat.RGBA32, true, true)
+            {
+                name = SafeAssetName(mapName + "_" + chunkName + "_baked_normal"),
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Trilinear,
+                anisoLevel = 8,
+            };
+            tex.SetPixels32(src.GetPixels32());
+            tex.Apply(true, false);
+
+            string path = outputPath + "/BakedChunks/" + tex.name + ".asset";
+            SaveAsset(tex, path);
+            return AssetDatabase.LoadAssetAtPath<Texture2D>(path) ?? tex;
         }
 
         private class FastTextureSampler
@@ -392,10 +437,12 @@ namespace WoTMapImporter.Editor.Terrain
             int uvMinY,
             int uvMaxY)
         {
-            var outTex = new Texture2D(resolution, resolution, TextureFormat.RGBA32, false, false)
+            // mipChain=true so distant chunks get proper mip filtering (no shimmer).
+            var outTex = new Texture2D(resolution, resolution, TextureFormat.RGBA32, true, false)
             {
                 wrapMode = TextureWrapMode.Clamp,
-                filterMode = FilterMode.Bilinear,
+                filterMode = FilterMode.Trilinear,
+                anisoLevel = 8,
             };
 
             var pixels = new Color32[resolution * resolution];
@@ -580,7 +627,7 @@ namespace WoTMapImporter.Editor.Terrain
             });
 
             outTex.SetPixels32(pixels);
-            outTex.Apply(false, false);
+            outTex.Apply(true, false); // generate mipmaps
             return outTex;
         }
 
