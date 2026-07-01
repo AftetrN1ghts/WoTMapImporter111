@@ -239,17 +239,18 @@ namespace WoTMapImporter.Editor.EnvLighting
             light.shadows = LightShadows.Soft;
 
             // --- Ambient ---
-            Color amb = SampleAmbient(env, hour);
+            Color amb = SampleAmbient(env, hour) * Mathf.Clamp(env.AmbientLumMultiplier / 1.5f, 0.5f, 1.5f);
             RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
-            RenderSettings.ambientLight = amb * Mathf.Clamp(env.AmbientLumMultiplier / 1.5f, 0.5f, 1.5f);
+            RenderSettings.ambientLight = amb;
             RenderSettings.sun = light;
 
             // --- Fog ---
+            Color fogCol = env.FogColor * Mathf.Lerp(0.4f, 1f, dayF);
             if (env.FogEnabled)
             {
                 RenderSettings.fog = true;
                 RenderSettings.fogMode = FogMode.Linear;
-                RenderSettings.fogColor = env.FogColor * Mathf.Lerp(0.4f, 1f, dayF);
+                RenderSettings.fogColor = fogCol;
                 RenderSettings.fogStartDistance = env.FogNear;
                 RenderSettings.fogEndDistance = env.FogFar;
             }
@@ -260,6 +261,19 @@ namespace WoTMapImporter.Editor.EnvLighting
                 RenderSettings.skybox = skyMat;
 
             DynamicGI.UpdateEnvironment();
+
+            // Make the environment self-contained in the prefab: RenderSettings live
+            // in the scene, not the prefab, so a placed map would lose its skybox.
+            var envComp = root.GetComponent<WoTMapImporter.Runtime.WoTEnvironment>();
+            if (envComp == null) envComp = root.AddComponent<WoTMapImporter.Runtime.WoTEnvironment>();
+            envComp.Skybox = skyMat;
+            envComp.ApplyAmbient = true;
+            envComp.AmbientColor = amb;
+            envComp.ApplyFog = env.FogEnabled;
+            envComp.FogColor = fogCol;
+            envComp.FogStart = env.FogNear;
+            envComp.FogEnd = env.FogFar;
+            envComp.Sun = light;
         }
 
         private static Material BuildSkyboxMaterial(EnvironmentData env, float hour, float dayF, Color sunCol, string folder, WoTPackageManager resMgr, List<string> warnings)
