@@ -36,8 +36,8 @@ namespace WoTMapImporter.Editor
         private bool _loadWetness = false;
         private int _maxResolution = 4097;
         private int _terrainBakeResolution = 2048;
-        private bool _terrainLiveSplat = true;
-        private float _terrainAOStrength = 1f;
+        private bool _terrainLiveSplat = false;
+        private float _terrainAOStrength = 0.5f;
         private WoTMapImporter.TerrainImportMode _terrainMode = WoTMapImporter.TerrainImportMode.MeshChunks;
         private bool _mapsParsed;
         private Vector2 _scroll;
@@ -68,7 +68,7 @@ namespace WoTMapImporter.Editor
             _floraDrawDistance = EditorPrefs.GetFloat("WoTMapImporter.floraDrawDistance", _floraDrawDistance);
             _terrainMode = (WoTMapImporter.TerrainImportMode)EditorPrefs.GetInt("WoTMapImporter.terrainMode", (int)_terrainMode);
             _terrainBakeResolution = EditorPrefs.GetInt("WoTMapImporter.terrainBakeResolution", _terrainBakeResolution);
-            _terrainLiveSplat = EditorPrefs.GetBool("WoTMapImporter.terrainLiveSplat", _terrainLiveSplat);
+            _terrainLiveSplat = EditorPrefs.GetBool("WoTMapImporter.terrainLiveSplat2", _terrainLiveSplat);
             _terrainAOStrength = EditorPrefs.GetFloat("WoTMapImporter.terrainAOStrength", _terrainAOStrength);
         }
 
@@ -85,7 +85,7 @@ namespace WoTMapImporter.Editor
             EditorPrefs.SetFloat("WoTMapImporter.floraDrawDistance", _floraDrawDistance);
             EditorPrefs.SetInt("WoTMapImporter.terrainMode", (int)_terrainMode);
             EditorPrefs.SetInt("WoTMapImporter.terrainBakeResolution", _terrainBakeResolution);
-            EditorPrefs.SetBool("WoTMapImporter.terrainLiveSplat", _terrainLiveSplat);
+            EditorPrefs.SetBool("WoTMapImporter.terrainLiveSplat2", _terrainLiveSplat);
             EditorPrefs.SetFloat("WoTMapImporter.terrainAOStrength", _terrainAOStrength);
         }
 
@@ -154,11 +154,8 @@ namespace WoTMapImporter.Editor
                 }
                 using (new EditorGUI.DisabledScope(_terrainMode != WoTMapImporter.TerrainImportMode.MeshChunks))
                 {
-                    _terrainLiveSplat = EditorGUILayout.Toggle("Live-splat terrain (recommended)", _terrainLiveSplat);
-                    using (new EditorGUI.DisabledScope(!_terrainLiveSplat))
-                    {
-                        _terrainAOStrength = EditorGUILayout.Slider("Terrain AO strength", _terrainAOStrength, 0f, 1f);
-                    }
+                    _terrainLiveSplat = EditorGUILayout.Toggle("Live-splat terrain (experimental)", _terrainLiveSplat);
+                    _terrainAOStrength = EditorGUILayout.Slider("Terrain AO strength", _terrainAOStrength, 0f, 1f);
                     using (new EditorGUI.DisabledScope(_terrainLiveSplat))
                     {
                         _terrainBakeResolution = EditorGUILayout.IntPopup(

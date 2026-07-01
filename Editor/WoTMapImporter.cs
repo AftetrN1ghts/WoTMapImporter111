@@ -49,10 +49,10 @@ namespace WoTMapImporter.Editor
             public int TerrainBakeResolution = 2048;
             // Mesh terrain: blend the original WoT tiles live in the shader (sharp,
             // tiny on disk) instead of baking a big per-chunk albedo texture.
-            public bool TerrainLiveSplat = true;
+            public bool TerrainLiveSplat = false;
             // Strength of the per-chunk baked ambient occlusion applied to mesh
             // terrain (relief detail). 0 = off, 1 = full.
-            public float TerrainAOStrength = 1f;
+            public float TerrainAOStrength = 0.5f;
             public TerrainImportMode TerrainMode = TerrainImportMode.MeshChunks;
         }
 

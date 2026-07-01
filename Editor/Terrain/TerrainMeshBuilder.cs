@@ -128,7 +128,7 @@ namespace WoTMapImporter.Editor.Terrain
                         ? BuildChunkMaterial(shader, outputPath, mapInfo.Name, terrain, chunk, resMgr, globalMap,
                                              uvMinX, uvMaxX, uvMinY, uvMaxY, loadNormals, aoStrength)
                         : BuildBakedChunkMaterial(shader, outputPath, mapInfo.Name, terrain, chunk, resMgr, globalMap,
-                                             uvMinX, uvMaxX, uvMinY, uvMaxY, loadNormals, bakeResolution);
+                                             uvMinX, uvMaxX, uvMinY, uvMaxY, loadNormals, bakeResolution, aoStrength);
 
                     var go = new GameObject(chunk.ChunkName + "_TerrainMesh");
                     go.transform.position = new Vector3(chunk.ChunkPos.x, 0f, chunk.ChunkPos.y);
@@ -252,7 +252,8 @@ namespace WoTMapImporter.Editor.Terrain
             int uvMinY,
             int uvMaxY,
             bool loadNormals,
-            int bakeResolution)
+            int bakeResolution,
+            float aoStrength)
         {
             int layerCount = Mathf.Min(chunk.Layers.Count, 16);
             var layerTextures = new Texture2D[layerCount];
@@ -267,8 +268,19 @@ namespace WoTMapImporter.Editor.Terrain
                 else missing++;
             }
 
-            Texture2D baked = BakeChunkAlbedo(chunk, terrain.ChunkSize, layerTextures, layerMap, bakeResolution, uvMinX, uvMaxX, uvMinY, uvMaxY);
+            Texture2D baked = BakeChunkAlbedo(chunk, terrain.ChunkSize, layerTextures, layerMap, bakeResolution, uvMinX, uvMaxX, uvMinY, uvMaxY, aoStrength);
             baked.name = SafeAssetName(mapName + "_" + chunk.ChunkName + "_baked_albedo");
+            // GPU block-compress the baked albedo: DXT1 (no alpha) cuts a 2048² chunk
+            // from ~16 MB RGBA32 to ~2.7 MB with mips, the main baked-mode disk win.
+            if ((baked.width & 3) == 0 && (baked.height & 3) == 0)
+            {
+                try
+                {
+                    EditorUtility.CompressTexture(baked, TextureFormat.DXT1, TextureCompressionQuality.Normal);
+                    baked.Apply(false, false);
+                }
+                catch (Exception e) { WoTLogger.Warn($"Baked albedo compression failed ({chunk.ChunkName}): {e.Message}"); }
+            }
             string texPath = outputPath + "/BakedChunks/" + baked.name + ".asset";
             SaveAsset(baked, texPath);
             baked = AssetDatabase.LoadAssetAtPath<Texture2D>(texPath) ?? baked;
@@ -475,7 +487,8 @@ namespace WoTMapImporter.Editor.Terrain
             int uvMinX,
             int uvMaxX,
             int uvMinY,
-            int uvMaxY)
+            int uvMaxY,
+            float aoStrength)
         {
             // mipChain=true so distant chunks get proper mip filtering (no shimmer).
             var outTex = new Texture2D(resolution, resolution, TextureFormat.RGBA32, true, false)
@@ -487,6 +500,13 @@ namespace WoTMapImporter.Editor.Terrain
 
             var pixels = new Color32[resolution * resolution];
             int layerCount = Mathf.Min(layerTextures != null ? layerTextures.Length : 0, 16);
+
+            // Per-chunk baked ambient occlusion (relief detail from the source
+            // terrain). Baked straight into the albedo so it costs nothing at
+            // runtime and needs no extra texture on disk. Sampled with the same
+            // chunk-local (u, 1-v) orientation as the blend maps.
+            FastTextureSampler aoSampler = (aoStrength > 0.001f && chunk.AoTex != null)
+                ? new FastTextureSampler(chunk.AoTex) : null;
 
             // Pre-cache texture samplers and pre-filter active layers
             var cachedBlends = new FastTextureSampler[chunk.BlendTextures != null ? chunk.BlendTextures.Count : 0];
@@ -652,6 +672,13 @@ namespace WoTMapImporter.Editor.Terrain
                             c = fallbackSampler.SampleRepeat(luv.x, luv.y);
                         }
                         acc = new Vector3(c.r, c.g, c.b);
+                    }
+
+                    if (aoSampler != null)
+                    {
+                        float ao = aoSampler.SampleClamp(bakeU, blendV).r;
+                        float f = 1f + (ao - 1f) * aoStrength;
+                        acc.x *= f; acc.y *= f; acc.z *= f;
                     }
 
                     acc.x = acc.x < 0f ? 0f : (acc.x > 1f ? 1f : acc.x);
