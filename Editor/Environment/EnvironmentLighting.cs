@@ -7,6 +7,7 @@ using UnityEngine;
 using WoTMapImporter.Editor.Image;
 using WoTMapImporter.Editor.Package;
 using WoTMapImporter.Editor.Xml;
+using WoTEnvironment = WoTMapImporter.Runtime.WoTEnvironment;
 
 namespace WoTMapImporter.Editor.EnvLighting
 {
@@ -264,8 +265,8 @@ namespace WoTMapImporter.Editor.EnvLighting
 
             // Make the environment self-contained in the prefab: RenderSettings live
             // in the scene, not the prefab, so a placed map would lose its skybox.
-            var envComp = root.GetComponent<WoTMapImporter.Runtime.WoTEnvironment>();
-            if (envComp == null) envComp = root.AddComponent<WoTMapImporter.Runtime.WoTEnvironment>();
+            var envComp = root.GetComponent<WoTEnvironment>();
+            if (envComp == null) envComp = root.AddComponent<WoTEnvironment>();
             envComp.Skybox = skyMat;
             envComp.ApplyAmbient = true;
             envComp.AmbientColor = amb;
