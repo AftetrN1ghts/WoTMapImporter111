@@ -44,6 +44,13 @@ Shader "WoT/TerrainMultilayer"
             #pragma fragment frag
             #pragma target 3.5
 
+            // URP shadow keywords — without them the terrain never samples the
+            // main-light shadow map, so cast shadows (e.g. from trees) are invisible.
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE _MAIN_LIGHT_SHADOWS_SCREEN
+            #pragma multi_compile_fragment _ _SHADOWS_SOFT _SHADOWS_SOFT_LOW
+            #pragma multi_compile_fragment _ _SHADOW_CASCADES_BLEND
+            #pragma multi_compile _ SHADOWS_SHADOWMASK
+
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
 
@@ -188,9 +195,16 @@ Shader "WoT/TerrainMultilayer"
                 }
 
                 float3 nWS = normalize(IN.normalWS);
-                Light mainLight = GetMainLight();
+                #if defined(_MAIN_LIGHT_SHADOWS_SCREEN)
+                    float4 shadowCoord = ComputeScreenPos(TransformWorldToHClip(IN.positionWS));
+                #elif defined(_MAIN_LIGHT_SHADOWS) || defined(_MAIN_LIGHT_SHADOWS_CASCADE)
+                    float4 shadowCoord = TransformWorldToShadowCoord(IN.positionWS);
+                #else
+                    float4 shadowCoord = float4(0,0,0,0);
+                #endif
+                Light mainLight = GetMainLight(shadowCoord);
                 float ndotl = saturate(dot(nWS, mainLight.direction));
-                float3 color = albedo * (mainLight.color * ndotl + unity_AmbientSky.rgb + 0.2);
+                float3 color = albedo * (mainLight.color * ndotl * mainLight.shadowAttenuation + unity_AmbientSky.rgb + 0.2);
 
                 return half4(color, 1);
             }
