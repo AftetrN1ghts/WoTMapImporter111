@@ -107,7 +107,7 @@ namespace WoTMapImporter.Editor
                 resourcePackages.Insert(0, "particles.pkg");
                 resourcePackages.Insert(0, $"{spaceName}_bin.pkg");
                 resourcePackages.Insert(0, $"{spaceName}.pkg");
-                AddOptionalResourcePackages(wotResPath, resourcePackages);
+                AddOptionalResourcePackages(wotResPath, resourcePackages, spaceName);
                 pkgMgr = new WoTPackageManager(wotResPath, resourcePackages);
 
                 progress?.Invoke(0.15f, "Loading space settings...");
@@ -257,7 +257,7 @@ namespace WoTMapImporter.Editor
             return list;
         }
 
-        private static void AddOptionalResourcePackages(string wotResPath, List<string> packages)
+        private static void AddOptionalResourcePackages(string wotResPath, List<string> packages, string spaceName)
         {
             if (!Directory.Exists(wotResPath) || packages == null) return;
             var seen = new HashSet<string>(packages, StringComparer.OrdinalIgnoreCase);
@@ -268,6 +268,15 @@ namespace WoTMapImporter.Editor
                 if (!File.Exists(Path.Combine(wotResPath, pkgName))) return;
                 packages.Add(pkgName);
                 seen.Add(pkgName);
+            }
+
+            // The map's own package(s) can hold the map-specific SpeedTree/flora
+            // resources (older maps sometimes split them across <map>_*.pkg), so pull
+            // in every package named after the map, not just <map>.pkg / <map>_bin.pkg.
+            if (!string.IsNullOrEmpty(spaceName))
+            {
+                foreach (var f in Directory.GetFiles(wotResPath, $"{spaceName}*.pkg"))
+                    AddIfExists(Path.GetFileName(f));
             }
 
             // SpeedTree resources are normally in shared*.pkg, but some clients/modded
