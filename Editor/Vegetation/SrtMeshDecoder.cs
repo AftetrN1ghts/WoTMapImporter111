@@ -664,6 +664,7 @@ namespace WoTMapImporter.Editor.Vegetation
             var mat = new Material(shader)
             {
                 name = SafeAssetName($"{PathName(resourceName)}_rs{renderStateIndex}_{PathName(usedTextureName)}"),
+                enableInstancing = true,
             };
             if (tex != null)
             {

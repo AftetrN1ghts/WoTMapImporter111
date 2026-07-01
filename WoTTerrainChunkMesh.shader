@@ -46,6 +46,9 @@ Shader "WoT/TerrainChunkMesh"
         [HideInInspector][Normal] _Normal15 ("Normal15", 2D) = "bump" {}
 
         [HideInInspector] _GlobalMap ("Global AM", 2D) = "white" {}
+        [HideInInspector] _AO        ("Ambient Occlusion", 2D) = "white" {}
+        _UseAO          ("Use Ambient Occlusion", Float) = 0
+        _AOStrength     ("AO Strength",         Range(0,1)) = 1
         _NumLayers      ("Num Layers",         Float) = 0
         _NumBlends      ("Num Blend Textures",  Float) = 0
         _NewBlendFormat ("New Blend Format",    Float) = 1
@@ -86,6 +89,7 @@ Shader "WoT/TerrainChunkMesh"
             TEXTURE2D(_Blend1); TEXTURE2D(_Blend2); TEXTURE2D(_Blend3);
             TEXTURE2D(_Blend4); TEXTURE2D(_Blend5); TEXTURE2D(_Blend6); TEXTURE2D(_Blend7);
             TEXTURE2D(_GlobalMap);
+            TEXTURE2D(_AO);
 
             TEXTURE2D(_Splat0);  TEXTURE2D(_Splat1);  TEXTURE2D(_Splat2);  TEXTURE2D(_Splat3);
             TEXTURE2D(_Splat4);  TEXTURE2D(_Splat5);  TEXTURE2D(_Splat6);  TEXTURE2D(_Splat7);
@@ -113,6 +117,8 @@ Shader "WoT/TerrainChunkMesh"
                 float  _Brightness;
                 float  _BumpScale;
                 float  _UseNormalMaps;
+                float  _UseAO;
+                float  _AOStrength;
             CBUFFER_END
 
             struct Attributes {
@@ -282,6 +288,14 @@ Shader "WoT/TerrainChunkMesh"
 
                 if (_UseGlobalMap > 0.5)
                     albedo *= SAMPLE_TEXTURE2D(_GlobalMap, sampler_Blend0, saturate(ChunkMapUV(IN.uv))).rgb;
+
+                // Per-chunk baked ambient occlusion (relief detail from the source
+                // terrain). Same chunk-local UV orientation as the blend maps.
+                if (_UseAO > 0.5)
+                {
+                    float ao = SAMPLE_TEXTURE2D(_AO, sampler_Blend0, blendUV).r;
+                    albedo *= lerp(1.0, ao, saturate(_AOStrength));
+                }
 
                 float3 nWS;
                 if (_UseNormalMaps > 0.5 && dot(tsNormal, tsNormal) > 1e-6)

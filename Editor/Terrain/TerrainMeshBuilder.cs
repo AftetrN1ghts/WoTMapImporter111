@@ -39,8 +39,14 @@ namespace WoTMapImporter.Editor.Terrain
             UniversalTerrain terrain,
             List<TerrainChunk> chunks,
             WoTPackageManager resMgr,
-            bool loadWetness)
+            bool loadWetness,
+            bool loadNormals = true,
+            int bakeResolution = 2048,
+            bool liveSplat = true,
+            float aoStrength = 1f)
         {
+            // Keep the baked albedo a sane power-of-two; guards against silly UI values.
+            bakeResolution = Mathf.Clamp(Mathf.ClosestPowerOfTwo(bakeResolution), 512, 4096);
             _globalTextureCache.Clear();
             _globalSamplerCache.Clear();
 
@@ -91,9 +97,15 @@ namespace WoTMapImporter.Editor.Terrain
             WoTLogger.Info($"Mesh terrain UV bounds from chunks: x[{uvMinX}..{uvMaxX}] y[{uvMinY}..{uvMaxY}] " +
                            $"metadata x[{terrain.MinX}..{terrain.MaxX}] y[{terrain.MinY}..{terrain.MaxY}]");
 
-            var shader = Shader.Find("WoT/TerrainChunkBaked");
+            // Live-splat blends the original WoT tile textures + small per-chunk
+            // blend maps in the shader (sharp at any distance, tiny on disk because
+            // tiles are shared/deduped).  Baked flattens everything into one big
+            // per-chunk albedo (heavy on disk, blurry up close) and is kept as an
+            // opt-in fallback for weak GPUs.
+            string shaderName = liveSplat ? "WoT/TerrainChunkMesh" : "WoT/TerrainChunkBaked";
+            var shader = Shader.Find(shaderName);
             if (shader == null)
-                result.Warnings.Add("Shader 'WoT/TerrainChunkBaked' not found. Chunks will use URP/Standard material fallback.");
+                result.Warnings.Add($"Shader '{shaderName}' not found. Chunks will use URP/Standard material fallback.");
 
             int built = 0, skipped = 0;
             foreach (var chunk in chunks)
@@ -112,8 +124,11 @@ namespace WoTMapImporter.Editor.Terrain
                     SaveAsset(mesh, meshPath);
                     mesh = AssetDatabase.LoadAssetAtPath<UnityMesh>(meshPath) ?? mesh;
 
-                    Material mat = BuildBakedChunkMaterial(shader, outputPath, mapInfo.Name, terrain, chunk, resMgr, globalMap,
-                                                       uvMinX, uvMaxX, uvMinY, uvMaxY);
+                    Material mat = liveSplat
+                        ? BuildChunkMaterial(shader, outputPath, mapInfo.Name, terrain, chunk, resMgr, globalMap,
+                                             uvMinX, uvMaxX, uvMinY, uvMaxY, loadNormals, aoStrength)
+                        : BuildBakedChunkMaterial(shader, outputPath, mapInfo.Name, terrain, chunk, resMgr, globalMap,
+                                             uvMinX, uvMaxX, uvMinY, uvMaxY, loadNormals, bakeResolution, aoStrength);
 
                     var go = new GameObject(chunk.ChunkName + "_TerrainMesh");
                     go.transform.position = new Vector3(chunk.ChunkPos.x, 0f, chunk.ChunkPos.y);
@@ -235,7 +250,10 @@ namespace WoTMapImporter.Editor.Terrain
             int uvMinX,
             int uvMaxX,
             int uvMinY,
-            int uvMaxY)
+            int uvMaxY,
+            bool loadNormals,
+            int bakeResolution,
+            float aoStrength)
         {
             int layerCount = Mathf.Min(chunk.Layers.Count, 16);
             var layerTextures = new Texture2D[layerCount];
@@ -250,13 +268,27 @@ namespace WoTMapImporter.Editor.Terrain
                 else missing++;
             }
 
-            Texture2D baked = BakeChunkAlbedo(chunk, terrain.ChunkSize, layerTextures, layerMap, 1024, uvMinX, uvMaxX, uvMinY, uvMaxY);
+            Texture2D baked = BakeChunkAlbedo(chunk, terrain.ChunkSize, layerTextures, layerMap, bakeResolution, uvMinX, uvMaxX, uvMinY, uvMaxY, aoStrength);
             baked.name = SafeAssetName(mapName + "_" + chunk.ChunkName + "_baked_albedo");
+            // GPU block-compress the baked albedo: DXT1 (no alpha) cuts a 2048² chunk
+            // from ~16 MB RGBA32 to ~2.7 MB with mips, the main baked-mode disk win.
+            if ((baked.width & 3) == 0 && (baked.height & 3) == 0)
+            {
+                try
+                {
+                    EditorUtility.CompressTexture(baked, TextureFormat.DXT1, TextureCompressionQuality.Normal);
+                    baked.Apply(false, false);
+                }
+                catch (Exception e) { WoTLogger.Warn($"Baked albedo compression failed ({chunk.ChunkName}): {e.Message}"); }
+            }
             string texPath = outputPath + "/BakedChunks/" + baked.name + ".asset";
             SaveAsset(baked, texPath);
             baked = AssetDatabase.LoadAssetAtPath<Texture2D>(texPath) ?? baked;
             baked.wrapMode = TextureWrapMode.Clamp;
-            baked.filterMode = FilterMode.Bilinear;
+            // Trilinear + anisotropy removes the up-close blur and the distance
+            // shimmer the old bilinear/no-mip baked chunks had.
+            baked.filterMode = FilterMode.Trilinear;
+            baked.anisoLevel = 8;
 
             Material mat;
             if (shader != null) mat = new Material(shader);
@@ -271,12 +303,77 @@ namespace WoTMapImporter.Editor.Terrain
             mat.SetFloat("_UVFlipX", 0f);
             mat.SetFloat("_UVFlipY", 0f);
 
+            // Feed the WoT per-chunk normals (terrain2/normals in the .cdata) into the
+            // shader so the terrain actually gets surface detail instead of a flat
+            // "bump" default.  Previously this texture was decoded but never assigned.
+            if (loadNormals && chunk.NormalsTex != null)
+            {
+                var nrm = PersistChunkNormal(chunk.NormalsTex, outputPath, mapName, chunk.ChunkName);
+                if (nrm != null)
+                {
+                    mat.SetTexture("_NormalMap", nrm);
+                    mat.SetTexture("_BumpMap", nrm); // URP/Lit fallback
+                    mat.EnableKeyword("_NORMALMAP");
+                    mat.SetFloat("_NormalStrength", 1f);
+                }
+            }
+
             string matPath = outputPath + "/Materials/" + mat.name + ".mat";
             SaveAsset(mat, matPath);
             var persistedMat = AssetDatabase.LoadAssetAtPath<Material>(matPath) ?? mat;
 
             WoTLogger.Info($"Chunk {chunk.ChunkName}: BAKED mesh material {baked.width}x{baked.height}, layers={layerCount}, textures loaded={loaded}, missing={missing}, blends={chunk.BlendTextures?.Count ?? 0}, newFmt={chunk.IsNewBlendFormat}");
             return persistedMat;
+        }
+
+        // Persists the per-chunk WoT normal texture (decoded from terrain2/normals)
+        // as an asset with mipmaps/anisotropy so the baked terrain shader can sample it.
+        private static Texture2D PersistChunkNormal(Texture2D src, string outputPath, string mapName, string chunkName)
+        {
+            if (src == null) return null;
+
+            var tex = new Texture2D(src.width, src.height, TextureFormat.RGBA32, true, true)
+            {
+                name = SafeAssetName(mapName + "_" + chunkName + "_baked_normal"),
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Trilinear,
+                anisoLevel = 8,
+            };
+            tex.SetPixels32(src.GetPixels32());
+            tex.Apply(true, false);
+
+            string path = outputPath + "/BakedChunks/" + tex.name + ".asset";
+            SaveAsset(tex, path);
+            return AssetDatabase.LoadAssetAtPath<Texture2D>(path) ?? tex;
+        }
+
+        // Per-chunk AO: small (usually 256²) grayscale relief map. Mip-chained and
+        // DXT1-compressed so 100 chunks cost a few MB instead of tens of MB.
+        private static Texture2D PersistChunkAo(Texture2D src, string outputPath, string mapName, string chunkName)
+        {
+            if (src == null) return null;
+
+            var tex = new Texture2D(src.width, src.height, TextureFormat.RGBA32, true, true)
+            {
+                name = SafeAssetName(mapName + "_" + chunkName + "_ao"),
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+            };
+            tex.SetPixels32(src.GetPixels32());
+            tex.Apply(true, false);
+            if ((tex.width & 3) == 0 && (tex.height & 3) == 0 && tex.width >= 4 && tex.height >= 4)
+            {
+                try
+                {
+                    EditorUtility.CompressTexture(tex, TextureFormat.DXT1, TextureCompressionQuality.Normal);
+                    tex.Apply(false, false);
+                }
+                catch (Exception e) { WoTLogger.Warn($"AO compression failed ({chunkName}): {e.Message}"); }
+            }
+
+            string path = outputPath + "/BakedChunks/" + tex.name + ".asset";
+            SaveAsset(tex, path);
+            return AssetDatabase.LoadAssetAtPath<Texture2D>(path) ?? tex;
         }
 
         private class FastTextureSampler
@@ -390,16 +487,26 @@ namespace WoTMapImporter.Editor.Terrain
             int uvMinX,
             int uvMaxX,
             int uvMinY,
-            int uvMaxY)
+            int uvMaxY,
+            float aoStrength)
         {
-            var outTex = new Texture2D(resolution, resolution, TextureFormat.RGBA32, false, false)
+            // mipChain=true so distant chunks get proper mip filtering (no shimmer).
+            var outTex = new Texture2D(resolution, resolution, TextureFormat.RGBA32, true, false)
             {
                 wrapMode = TextureWrapMode.Clamp,
-                filterMode = FilterMode.Bilinear,
+                filterMode = FilterMode.Trilinear,
+                anisoLevel = 8,
             };
 
             var pixels = new Color32[resolution * resolution];
             int layerCount = Mathf.Min(layerTextures != null ? layerTextures.Length : 0, 16);
+
+            // Per-chunk baked ambient occlusion (relief detail from the source
+            // terrain). Baked straight into the albedo so it costs nothing at
+            // runtime and needs no extra texture on disk. Sampled with the same
+            // chunk-local (u, 1-v) orientation as the blend maps.
+            FastTextureSampler aoSampler = (aoStrength > 0.001f && chunk.AoTex != null)
+                ? new FastTextureSampler(chunk.AoTex) : null;
 
             // Pre-cache texture samplers and pre-filter active layers
             var cachedBlends = new FastTextureSampler[chunk.BlendTextures != null ? chunk.BlendTextures.Count : 0];
@@ -567,6 +674,13 @@ namespace WoTMapImporter.Editor.Terrain
                         acc = new Vector3(c.r, c.g, c.b);
                     }
 
+                    if (aoSampler != null)
+                    {
+                        float ao = aoSampler.SampleClamp(bakeU, blendV).r;
+                        float f = 1f + (ao - 1f) * aoStrength;
+                        acc.x *= f; acc.y *= f; acc.z *= f;
+                    }
+
                     acc.x = acc.x < 0f ? 0f : (acc.x > 1f ? 1f : acc.x);
                     acc.y = acc.y < 0f ? 0f : (acc.y > 1f ? 1f : acc.y);
                     acc.z = acc.z < 0f ? 0f : (acc.z > 1f ? 1f : acc.z);
@@ -580,7 +694,7 @@ namespace WoTMapImporter.Editor.Terrain
             });
 
             outTex.SetPixels32(pixels);
-            outTex.Apply(false, false);
+            outTex.Apply(true, false); // generate mipmaps
             return outTex;
         }
 
@@ -603,7 +717,9 @@ namespace WoTMapImporter.Editor.Terrain
             int uvMinX,
             int uvMaxX,
             int uvMinY,
-            int uvMaxY)
+            int uvMaxY,
+            bool loadNormals,
+            float aoStrength)
         {
             Material mat;
             if (shader != null)
@@ -631,6 +747,7 @@ namespace WoTMapImporter.Editor.Terrain
             // Load and bind layer tile textures.
             int layerCount = Mathf.Min(chunk.Layers.Count, 16);
             int loaded = 0, missing = 0;
+            bool anyNormal = false;
             for (int i = 0; i < layerCount; i++)
             {
                 var layer = chunk.Layers[i];
@@ -646,7 +763,21 @@ namespace WoTMapImporter.Editor.Terrain
                     mat.SetTexture("_Splat" + i, Texture2D.whiteTexture);
                     WoTLogger.Warn($"Chunk {chunk.ChunkName}: layer texture not found: {layer.Name}");
                 }
+
+                // Per-layer tiled normal map (deduped by name into the shared
+                // Textures folder, linear import).  Gives real surface detail
+                // that follows the same tiling as the diffuse tile.
+                if (loadNormals && !string.IsNullOrEmpty(layer.NameNm))
+                {
+                    Texture2D nrm = LoadLayerTexture(resMgr, outputPath, mapName, chunk.ChunkName, i, layer.NameNm, true);
+                    if (nrm != null)
+                    {
+                        mat.SetTexture("_Normal" + i, nrm);
+                        anyNormal = true;
+                    }
+                }
             }
+            mat.SetFloat("_UseNormalMaps", loadNormals && anyNormal ? 1f : 0f);
 
             var layerU = new Vector4[16];
             var layerV = new Vector4[16];
@@ -717,6 +848,20 @@ namespace WoTMapImporter.Editor.Terrain
                 mat.SetFloat("_UseGlobalMap", 0f);
             }
 
+            // Per-chunk baked ambient occlusion: WoT's terrain relief detail. Applied
+            // as an albedo multiplier in the shader; the single biggest quality gain.
+            var ao = PersistChunkAo(chunk.AoTex, outputPath, mapName, chunk.ChunkName);
+            if (ao != null)
+            {
+                mat.SetTexture("_AO", ao);
+                mat.SetFloat("_UseAO", 1f);
+                mat.SetFloat("_AOStrength", aoStrength);
+            }
+            else
+            {
+                mat.SetFloat("_UseAO", 0f);
+            }
+
             string matPath = outputPath + "/Materials/" + mat.name + ".mat";
             SaveAsset(mat, matPath);
             var persistedMat = AssetDatabase.LoadAssetAtPath<Material>(matPath) ?? mat;
@@ -766,6 +911,36 @@ namespace WoTMapImporter.Editor.Terrain
             return new Vector4(rotRad, 0f, sx, sy);
         }
 
+        // Rebuild a decoded tile with a full mip chain (sharp at distance, no
+        // shimmer) and GPU block-compress it (major on-disk saving). Shared/deduped
+        // across all chunks via _globalTextureCache, so it is compressed only once.
+        private static Texture2D BuildSharedTile(Texture2D src, bool linear)
+        {
+            int w = src.width, h = src.height;
+            var pix = src.GetPixels32();
+            var t = new Texture2D(w, h, TextureFormat.RGBA32, true, linear);
+            t.SetPixels32(pix);
+            t.Apply(true, false);
+
+            // Block compression needs multiple-of-4 dimensions. Normal maps keep RGB
+            // via DXT5 (alpha≈1 → URP's UnpackNormalmapRGorAG picks the RGB path);
+            // diffuse tiles drop the unused alpha with DXT1.
+            if ((w & 3) == 0 && (h & 3) == 0 && w >= 4 && h >= 4)
+            {
+                var fmt = linear ? TextureFormat.DXT5 : TextureFormat.DXT1;
+                try
+                {
+                    EditorUtility.CompressTexture(t, fmt, TextureCompressionQuality.Normal);
+                    t.Apply(false, false);
+                }
+                catch (Exception e)
+                {
+                    WoTLogger.Warn($"Tile compression failed ({src.name}): {e.Message}");
+                }
+            }
+            return t;
+        }
+
         private static Texture2D LoadLayerTexture(
             WoTPackageManager resMgr,
             string outputPath,
@@ -784,11 +959,16 @@ namespace WoTMapImporter.Editor.Terrain
             byte[] data = resMgr.ReadBytes(textureName) ?? TryAlternatePaths(resMgr, textureName);
             if (data == null) return null;
 
-            Texture2D tex = LoadTexture(data, textureName, linear, readable);
-            if (tex == null) return null;
+            // Force readable so we can rebuild the tile with a full mip chain and
+            // GPU-block compress it (huge disk win: e.g. a 4096² RGBA32 color_tex
+            // asset drops from ~64 MB to ~8-16 MB).
+            Texture2D src = LoadTexture(data, textureName, linear, true);
+            if (src == null) return null;
 
+            Texture2D tex = BuildSharedTile(src, linear);
             tex.wrapMode = TextureWrapMode.Repeat;
-            tex.filterMode = FilterMode.Bilinear;
+            tex.filterMode = FilterMode.Trilinear;
+            tex.anisoLevel = 8;
             tex.name = SafeAssetName(mapName + "_global_layer_" + Path.GetFileNameWithoutExtension(textureName));
 
             string path = outputPath + "/Textures/" + tex.name + ".asset";

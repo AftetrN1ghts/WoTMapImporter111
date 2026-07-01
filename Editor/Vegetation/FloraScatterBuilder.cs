@@ -12,6 +12,7 @@ using WoTMapImporter.Editor.Package;
 using WoTMapImporter.Editor.Terrain;
 using WoTMapImporter.Editor.Utils;
 using WoTMapImporter.Editor.Xml;
+using WoTMapImporter.Runtime;
 
 namespace WoTMapImporter.Editor.Vegetation
 {
@@ -40,7 +41,19 @@ namespace WoTMapImporter.Editor.Vegetation
             public float Density = 0.25f;          // instances per square metre
             public int MaxInstancesPerChunk = 4000;
             public float WeightThreshold = 0.25f;  // min dominant blend weight to grow
+            // Render flora through GPU instancing (store only per-instance matrices)
+            // instead of baking a combined mesh per chunk.  Saves a large amount of
+            // disk/scene space and draw calls.
+            public bool UseGpuInstancing = true;
+            public float MaxDrawDistance = 250f;   // coarse LOD: cull patches past this (0 = never)
         }
+
+        // Deduplicate textures/materials across all ecotypes so an atlas or grass
+        // material shared by several species is written to disk only once.
+        private static readonly Dictionary<string, Texture2D> _texCache =
+            new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, Material> _matCache =
+            new Dictionary<string, Material>(StringComparer.OrdinalIgnoreCase);
 
         public sealed class Result
         {
@@ -71,6 +84,11 @@ namespace WoTMapImporter.Editor.Vegetation
             if (settings == null) settings = new Settings();
             if (resMgr == null || chunks == null || chunks.Count == 0) return result;
 
+            _texCache.Clear();
+            _matCache.Clear();
+            string sharedDir = $"{outputPath}/VegetationAssets/_Flora/_Shared".Replace('\\', '/');
+            EnsureFolder(sharedDir);
+
             List<Ecotype> ecotypes;
             try
             {
@@ -95,7 +113,7 @@ namespace WoTMapImporter.Editor.Vegetation
                 {
                     string visual = eco.Visuals[i];
                     if (speciesCache.ContainsKey(visual)) continue;
-                    var sp = LoadSpecies(outputPath, visual, resMgr, result.Warnings);
+                    var sp = LoadSpecies(outputPath, sharedDir, visual, resMgr, result.Warnings);
                     if (sp != null)
                     {
                         sp.ScaleVariation = i < eco.ScaleVariation.Count ? eco.ScaleVariation[i] : 0f;
@@ -178,7 +196,7 @@ namespace WoTMapImporter.Editor.Vegetation
 
         // ============================ mesh + material ============================
 
-        private static Species LoadSpecies(string outputPath, string visualResource, WoTPackageManager resMgr, List<string> warnings)
+        private static Species LoadSpecies(string outputPath, string sharedDir, string visualResource, WoTPackageManager resMgr, List<string> warnings)
         {
             string primitives = RemoveExtension(visualResource) + ".primitives";
             byte[] primBytes = resMgr.ReadBytes(primitives);
@@ -216,25 +234,33 @@ namespace WoTMapImporter.Editor.Vegetation
             if (decoded.Uv != null && decoded.Uv.Length == decoded.Positions.Length) mesh.uv = decoded.Uv;
             mesh.triangles = decoded.Indices;
             mesh.RecalculateNormals();
-            try { mesh.RecalculateTangents(); } catch { }
+            // Grass is alpha-cut and unlit-ish; tangents are not used by the flora
+            // material, so skip them to keep the mesh asset smaller.
             mesh.RecalculateBounds();
 
             string meshPath = $"{rootDir}/{mesh.name}.asset";
             SaveAsset(mesh, meshPath);
             var meshAsset = AssetDatabase.LoadAssetAtPath<UnityEngine.Mesh>(meshPath) ?? mesh;
 
-            Material mat = BuildMaterial(rootDir, visualResource, resMgr, warnings);
+            Material mat = BuildMaterial(sharedDir, visualResource, resMgr, warnings);
             return new Species { Mesh = meshAsset, Material = mat };
         }
 
-        private static Material BuildMaterial(string rootDir, string visualResource, WoTPackageManager resMgr, List<string> warnings)
+        private static Material BuildMaterial(string sharedDir, string visualResource, WoTPackageManager resMgr, List<string> warnings)
         {
             string diffuse = ReadDiffuseFromVisual(visualResource, resMgr);
-            Texture2D tex = diffuse != null ? LoadTexture(rootDir, diffuse, resMgr, warnings) : null;
+
+            // Materials with the same diffuse are identical; reuse one asset.
+            string matKey = diffuse ?? "__no_texture__";
+            if (_matCache.TryGetValue(matKey, out var cachedMat) && cachedMat != null)
+                return cachedMat;
+
+            Texture2D tex = diffuse != null ? LoadTexture(sharedDir, diffuse, resMgr, warnings) : null;
 
             Shader shader = Shader.Find("WoT/ObjectPBS") ?? Shader.Find("Universal Render Pipeline/Lit")
                             ?? Shader.Find("Standard") ?? Shader.Find("Sprites/Default");
-            var mat = new Material(shader) { name = SafeAssetName(PathName(visualResource) + "_flora_mat") };
+            string matName = SafeAssetName((diffuse != null ? PathName(diffuse) : PathName(visualResource)) + "_flora_mat");
+            var mat = new Material(shader) { name = matName, enableInstancing = true };
             if (tex != null)
             {
                 if (mat.HasProperty("_BaseMap")) mat.SetTexture("_BaseMap", tex);
@@ -254,9 +280,11 @@ namespace WoTMapImporter.Editor.Vegetation
             mat.EnableKeyword("_ALPHATEST_ON");
             mat.doubleSidedGI = true;
 
-            string matPath = $"{rootDir}/{mat.name}.mat";
+            string matPath = $"{sharedDir}/{mat.name}_{StableHash32(matKey):X8}.mat";
             SaveAsset(mat, matPath);
-            return AssetDatabase.LoadAssetAtPath<Material>(matPath) ?? mat;
+            var saved = AssetDatabase.LoadAssetAtPath<Material>(matPath) ?? mat;
+            _matCache[matKey] = saved;
+            return saved;
         }
 
         private static string ReadDiffuseFromVisual(string visualResource, WoTPackageManager resMgr)
@@ -284,8 +312,11 @@ namespace WoTMapImporter.Editor.Vegetation
             catch { return null; }
         }
 
-        private static Texture2D LoadTexture(string rootDir, string resource, WoTPackageManager resMgr, List<string> warnings)
+        private static Texture2D LoadTexture(string sharedDir, string resource, WoTPackageManager resMgr, List<string> warnings)
         {
+            if (_texCache.TryGetValue(resource, out var cachedTex) && cachedTex != null)
+                return cachedTex;
+
             byte[] bytes = resMgr.ReadBytes(resource);
             if (bytes == null) return null;
             try
@@ -304,9 +335,11 @@ namespace WoTMapImporter.Editor.Vegetation
                 tex.name = SafeAssetName(PathName(resource) + "_" + StableHash32(resource).ToString("X8"));
                 tex.wrapMode = TextureWrapMode.Repeat;
                 tex.filterMode = FilterMode.Bilinear;
-                string texPath = $"{rootDir}/{tex.name}.asset";
+                string texPath = $"{sharedDir}/{tex.name}.asset";
                 SaveAsset(tex, texPath);
-                return AssetDatabase.LoadAssetAtPath<Texture2D>(texPath) ?? tex;
+                var saved = AssetDatabase.LoadAssetAtPath<Texture2D>(texPath) ?? tex;
+                _texCache[resource] = saved;
+                return saved;
             }
             catch (Exception e)
             {
@@ -347,7 +380,7 @@ namespace WoTMapImporter.Editor.Vegetation
             int chunkY = Mathf.RoundToInt(chunk.ChunkPos.y / chunkSize);
             var rng = new System.Random(unchecked((chunkX * 73856093) ^ (chunkY * 19349663)));
 
-            var batches = new Dictionary<string, MeshBatch>();
+            var groups = new Dictionary<string, InstanceGroup>();
             int placed = 0;
 
             for (int cy = 0; cy < cells && placed < settings.MaxInstancesPerChunk; cy++)
@@ -383,12 +416,12 @@ namespace WoTMapImporter.Editor.Vegetation
                     if (scale < 0.1f) scale = 0.1f;
                     var trs = Matrix4x4.TRS(pos, Quaternion.Euler(0f, yaw, 0f), Vector3.one * scale);
 
-                    if (!batches.TryGetValue(visual, out var batch))
+                    if (!groups.TryGetValue(visual, out var group))
                     {
-                        batch = new MeshBatch { Species = sp };
-                        batches[visual] = batch;
+                        group = new InstanceGroup { Species = sp };
+                        groups[visual] = group;
                     }
-                    batch.Add(sp.Mesh, trs);
+                    group.Matrices.Add(trs);
                     placed++;
                 }
             }
@@ -397,26 +430,62 @@ namespace WoTMapImporter.Editor.Vegetation
 
             var chunkGo = new GameObject($"Flora_{chunk.ChunkName}");
             chunkGo.transform.SetParent(root.transform, false);
-            string dir = $"{outputPath}/VegetationAssets/_Flora/Chunks".Replace('\\', '/');
-            EnsureFolder(dir);
 
-            foreach (var kv in batches)
+            if (settings.UseGpuInstancing)
             {
-                var batch = kv.Value;
-                UnityEngine.Mesh combined = batch.Build($"{chunk.ChunkName}_{SafeAssetName(PathName(kv.Key))}");
-                if (combined == null) continue;
-                string meshPath = $"{dir}/{combined.name}.asset";
-                SaveAsset(combined, meshPath);
-                combined = AssetDatabase.LoadAssetAtPath<UnityEngine.Mesh>(meshPath) ?? combined;
-
-                var go = new GameObject(combined.name);
-                go.transform.SetParent(chunkGo.transform, false);
-                go.AddComponent<MeshFilter>().sharedMesh = combined;
-                var mr = go.AddComponent<MeshRenderer>();
-                mr.sharedMaterial = batch.Species.Material;
-                mr.shadowCastingMode = ShadowCastingMode.Off;
+                foreach (var kv in groups)
+                    EmitInstanced(chunkGo, kv.Value, settings);
+            }
+            else
+            {
+                string dir = $"{outputPath}/VegetationAssets/_Flora/Chunks".Replace('\\', '/');
+                EnsureFolder(dir);
+                foreach (var kv in groups)
+                    EmitBaked(chunkGo, dir, chunk.ChunkName, kv.Key, kv.Value);
             }
             return placed;
+        }
+
+        // GPU-instanced path: store only per-instance matrices, no baked geometry.
+        private static void EmitInstanced(GameObject chunkGo, InstanceGroup group, Settings settings)
+        {
+            if (group.Matrices.Count == 0 || group.Species.Mesh == null) return;
+
+            var go = new GameObject(SafeAssetName(group.Species.Mesh.name) + "_instances");
+            go.transform.SetParent(chunkGo.transform, false);
+
+            Bounds meshB = group.Species.Mesh.bounds;
+            var bounds = new Bounds(group.Matrices[0].GetColumn(3), Vector3.zero);
+            foreach (var m in group.Matrices)
+                bounds.Encapsulate(new Bounds((Vector3)m.GetColumn(3), meshB.size));
+
+            var r = go.AddComponent<WoTInstancedRenderer>();
+            r.mesh = group.Species.Mesh;
+            r.material = group.Species.Material;
+            r.instances = group.Matrices.ToArray();
+            r.shadowCasting = ShadowCastingMode.Off;
+            r.receiveShadows = true;
+            r.maxDrawDistance = settings.MaxDrawDistance;
+            r.localBounds = bounds;
+        }
+
+        // Fallback: bake one combined mesh per chunk+species (larger on disk).
+        private static void EmitBaked(GameObject chunkGo, string dir, string chunkName, string visual, InstanceGroup group)
+        {
+            var batch = new MeshBatch { Species = group.Species };
+            foreach (var m in group.Matrices) batch.Add(group.Species.Mesh, m);
+            UnityEngine.Mesh combined = batch.Build($"{chunkName}_{SafeAssetName(PathName(visual))}");
+            if (combined == null) return;
+            string meshPath = $"{dir}/{combined.name}.asset";
+            SaveAsset(combined, meshPath);
+            combined = AssetDatabase.LoadAssetAtPath<UnityEngine.Mesh>(meshPath) ?? combined;
+
+            var go = new GameObject(combined.name);
+            go.transform.SetParent(chunkGo.transform, false);
+            go.AddComponent<MeshFilter>().sharedMesh = combined;
+            var mr = go.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = group.Species.Material;
+            mr.shadowCastingMode = ShadowCastingMode.Off;
         }
 
         private static int FindLayer(TerrainChunk chunk, string textureBase)
@@ -477,6 +546,12 @@ namespace WoTMapImporter.Editor.Vegetation
                 Color32 c = _px[y * _w + x];
                 return new Color(c.r / 255f, c.g / 255f, c.b / 255f, c.a / 255f);
             }
+        }
+
+        private sealed class InstanceGroup
+        {
+            public Species Species;
+            public readonly List<Matrix4x4> Matrices = new List<Matrix4x4>();
         }
 
         private sealed class MeshBatch

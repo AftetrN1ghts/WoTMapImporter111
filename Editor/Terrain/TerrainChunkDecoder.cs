@@ -116,6 +116,16 @@ namespace WoTMapImporter.Editor.Terrain
                 chunk.NormalsTex = ReadNormalsTexture(ms2.ToArray(), chunkName);
             }
 
+            // Ambient occlusion (optional) - per-chunk baked relief shading ('mao\0').
+            var aoZ = zip.GetEntry("terrain2/ambientOcclusion");
+            if (aoZ != null)
+            {
+                using var fr = OpenZipEntry(aoZ, cdataBytes);
+                var ms3 = new MemoryStream();
+                fr.CopyTo(ms3);
+                chunk.AoTex = ReadAoTexture(ms3.ToArray(), chunkName);
+            }
+
             return chunk;
         }
 
@@ -275,6 +285,60 @@ namespace WoTMapImporter.Editor.Terrain
                 Buffer.BlockCopy(dds, 0, full, 0, dds.Length);
                 Buffer.BlockCopy(payload, 0, full, dds.Length, expectedSize);
                 var tex = DdsDecoder.ReadReadable(full, chunkName + "_normals");
+                tex.wrapMode = TextureWrapMode.Clamp;
+                tex.filterMode = FilterMode.Bilinear;
+                return tex;
+            }
+            return null;
+        }
+
+        // ============================ AMBIENT OCCLUSION ============================
+
+        public static Texture2D ReadAoTexture(byte[] data, string chunkName)
+        {
+            // Header: 'mao\0' + version(u16) + ... (same 4+12 layout as normals).
+            if (data.Length < 4 + 12) return null;
+            if (data[0] != 'm' || data[1] != 'a' || data[2] != 'o' || data[3] != 0)
+            {
+                WoTLogger.Warn($"Chunk {chunkName}: AO magic not 'mao'");
+                return null;
+            }
+            ushort version = BitConverter.ToUInt16(data, 4);
+            ushort w = BitConverter.ToUInt16(data, 8);
+            ushort h = BitConverter.ToUInt16(data, 10);
+
+            int dataStart = 4 + 12;
+            byte[] payload = new byte[data.Length - dataStart];
+            Buffer.BlockCopy(data, dataStart, payload, 0, payload.Length);
+
+            if (version == 1)
+            {
+                // Payload is a single-channel (L8) PNG.
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false, true)
+                {
+                    name = chunkName + "_ao",
+                    wrapMode = TextureWrapMode.Clamp,
+                    filterMode = FilterMode.Bilinear,
+                };
+                if (tex.LoadImage(payload, false))
+                    return tex;
+                UnityEngine.Object.DestroyImmediate(tex);
+                return null;
+            }
+            else if (version == 2)
+            {
+                int totalBlocks = ((w + 3) / 4) * ((h + 3) / 4);
+                int expectedSize = totalBlocks * 16;
+                if (payload.Length < expectedSize)
+                {
+                    WoTLogger.Warn($"Chunk {chunkName}: AO v2 payload too small ({payload.Length}/{expectedSize})");
+                    return null;
+                }
+                byte[] dds = BuildDdsDxT5Header((int)w, (int)h);
+                var full = new byte[dds.Length + expectedSize];
+                Buffer.BlockCopy(dds, 0, full, 0, dds.Length);
+                Buffer.BlockCopy(payload, 0, full, dds.Length, expectedSize);
+                var tex = DdsDecoder.ReadReadable(full, chunkName + "_ao");
                 tex.wrapMode = TextureWrapMode.Clamp;
                 tex.filterMode = FilterMode.Bilinear;
                 return tex;

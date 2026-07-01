@@ -192,7 +192,11 @@ namespace WoTMapImporter.Editor.Vegetation
             var ctree = new DecodedCtree();
             ctree.Strings.AddRange(FindLengthPrefixedStrings(data, stopAfter: 4096));
 
-            int o = FileHeaderSize;
+            // The file header is usually 36 bytes but some 0.8.x trees/bushes prepend
+            // an extra section (e.g. Cedar_02, Olive_bush start at offset 52).  Scan for
+            // the first parseable render group instead of assuming a fixed header size.
+            int o = FindFirstGroupOffset(data);
+            if (o < 0) return null;
             int guard = 0;
             while (o + 4 <= data.Length && guard++ < 8192)
             {
@@ -211,6 +215,14 @@ namespace WoTMapImporter.Editor.Vegetation
             }
 
             return ctree.Meshes.Count > 0 ? ctree : null;
+        }
+
+        private static int FindFirstGroupOffset(byte[] data)
+        {
+            int limit = Math.Min(data.Length - 8, FileHeaderSize + 1024);
+            for (int o = FileHeaderSize; o <= limit; o += 4)
+                if (TryParseGroup(data, o, out _, out _)) return o;
+            return -1;
         }
 
         private static int ResyncToNextGroup(byte[] data, int from)
@@ -250,9 +262,11 @@ namespace WoTMapImporter.Editor.Vegetation
                 MeshPart p = stride == StrideLeafCard
                     ? BuildLeafCardPart(data, off, vb, vcount)
                     : BuildStripMeshPart(data, off, vb, vcount, stride, stripOff, stripLen);
-                if (p == null) continue;
 
-                p.TextureName = PickDiffuse(texs);
+                // The group is structurally valid even if it carries no renderable
+                // geometry (e.g. Bush2_1/Sedge_1 start with an empty-strip placeholder
+                // group).  Advance past it so the real geometry groups are still read.
+                if (p != null) p.TextureName = PickDiffuse(texs);
                 part = p;
                 next = q;
                 return true;
@@ -301,7 +315,8 @@ namespace WoTMapImporter.Editor.Vegetation
             {
                 if (p + 4 > data.Length) return false;
                 int len = unchecked((int)ReadUInt32(data, p));
-                if (len < 1 || len > 2000000 || (long)p + 4 + (long)len * 4 > data.Length) return false;
+                // len == 0 is a valid empty strip (placeholder/LOD group).
+                if (len < 0 || len > 2000000 || (long)p + 4 + (long)len * 4 > data.Length) return false;
                 if (i == 0) { firstStripOff = p + 4; firstStripLen = len; }
                 p = p + 4 + len * 4;
             }
@@ -1059,6 +1074,7 @@ namespace WoTMapImporter.Editor.Vegetation
             var mat = new Material(shader)
             {
                 name = SafeAssetName($"{PathName(resourceName)}_{PathName(textureName ?? "ctree")}"),
+                enableInstancing = true,
             };
             if (tex != null)
             {

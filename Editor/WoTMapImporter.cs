@@ -6,6 +6,7 @@ using System.Linq;
 using UnityEditor;
 using UnityEngine;
 using WoTMapImporter.Editor.Data;
+using WoTMapImporter.Editor.EnvLighting;
 using WoTMapImporter.Editor.Package;
 using WoTMapImporter.Editor.Terrain;
 using WoTMapImporter.Editor.Vegetation;
@@ -41,10 +42,25 @@ namespace WoTMapImporter.Editor
             public bool LoadVegetation = true;
             public bool LoadFlora = true;
             public float FloraDensity = 0.25f;
+            public bool FloraGpuInstancing = true;
+            public float FloraDrawDistance = 250f;
             public bool LoadNormals = true;
             public bool LoadWetness = false;
             public int MaxHeightmapResolution = 4097;
+            public int TerrainBakeResolution = 2048;
+            // Mesh terrain: blend the original WoT tiles live in the shader (sharp,
+            // tiny on disk) instead of baking a big per-chunk albedo texture.
+            public bool TerrainLiveSplat = false;
+            // Strength of the per-chunk baked ambient occlusion applied to mesh
+            // terrain (relief detail). 0 = off, 1 = full.
+            public float TerrainAOStrength = 0.5f;
             public TerrainImportMode TerrainMode = TerrainImportMode.MeshChunks;
+            // Import the map's original lighting (sun/ambient/fog from the
+            // day_night_cycle) and skybox from the WoT sky environment file.
+            public bool LoadLighting = true;
+            // Time of day (hours 0..24) to sample the day/night cycle at.
+            // Negative = use the map's own starttime.
+            public float TimeOfDay = -1f;
         }
 
         public class ImportResult
@@ -141,7 +157,9 @@ namespace WoTMapImporter.Editor
                     if (settings.TerrainMode == TerrainImportMode.MeshChunks)
                     {
                         var meshResult = TerrainMeshBuilder.Build(folder, mapInfo, universalTerrain, chunks, pkgMgr,
-                                                                  settings.LoadWetness);
+                                                                  settings.LoadWetness, settings.LoadNormals,
+                                                                  settings.TerrainBakeResolution, settings.TerrainLiveSplat,
+                                                                  settings.TerrainAOStrength);
                         terrainObject = meshResult.TerrainObject;
                         result.Warnings.AddRange(meshResult.Warnings);
                     }
@@ -200,7 +218,12 @@ namespace WoTMapImporter.Editor
                         progress?.Invoke(0.98f, "Scattering ground flora...");
                         var floraResult = Vegetation.FloraScatterBuilder.Build(
                             folder, spaceName, universalTerrain, chunks, pkgMgr,
-                            new Vegetation.FloraScatterBuilder.Settings { Density = settings.FloraDensity });
+                            new Vegetation.FloraScatterBuilder.Settings
+                            {
+                                Density = settings.FloraDensity,
+                                UseGpuInstancing = settings.FloraGpuInstancing,
+                                MaxDrawDistance = settings.FloraDrawDistance,
+                            });
                         result.Warnings.AddRange(floraResult.Warnings);
                         if (floraResult.Root != null)
                             floraResult.Root.transform.SetParent(root.transform, false);
@@ -209,6 +232,39 @@ namespace WoTMapImporter.Editor
                     {
                         WoTLogger.Warn($"Flora scatter failed: {fe.Message}\n{fe.StackTrace}");
                         result.Warnings.Add("Flora scatter failed: " + fe.Message);
+                    }
+                }
+
+                // ---- Original map lighting + skybox (day/night cycle) ----
+                if (settings.LoadLighting)
+                {
+                    try
+                    {
+                        progress?.Invoke(0.99f, "Applying original lighting + skybox...");
+                        var (skyXml, skyDome) = GetSkyReferences(spaceDir);
+                        if (!string.IsNullOrEmpty(skyXml))
+                        {
+                            var env = EnvironmentLighting.Decode(pkgMgr, skyXml, skyDome, result.Warnings);
+                            if (env != null && env.HasAnyLightData)
+                            {
+                                float tod = settings.TimeOfDay < 0f ? env.StartTime : settings.TimeOfDay;
+                                EnvironmentLighting.Apply(env, tod, folder, pkgMgr, root, result.Warnings);
+                                WoTLogger.Info($"Applied original lighting from {skyXml} at time {tod:F1}h");
+                            }
+                            else
+                            {
+                                result.Warnings.Add("Sky env parsed but had no day/night light data; lighting skipped.");
+                            }
+                        }
+                        else
+                        {
+                            result.Warnings.Add("No sky environment referenced by space.settings; lighting skipped.");
+                        }
+                    }
+                    catch (Exception le)
+                    {
+                        WoTLogger.Warn($"Lighting/skybox import failed: {le.Message}\n{le.StackTrace}");
+                        result.Warnings.Add("Lighting/skybox import failed: " + le.Message);
                     }
                 }
 
@@ -430,6 +486,35 @@ namespace WoTMapImporter.Editor
             ut.MinX = ut.MinY = 0;
             ut.MaxX = ut.MaxY = 0;
             return ut;
+        }
+
+        // Reads the sky environment references from space.settings: the day/night
+        // cycle file (timeOfDay/skyGradientDome) and the skydome visual (skyDome).
+        private static (string skyXml, string skyDome) GetSkyReferences(string spaceDir)
+        {
+            string settingsPath = Path.Combine(spaceDir, "space.settings");
+            if (!File.Exists(settingsPath)) return (null, null);
+            try
+            {
+                var doc = XmlUnpacker.ReadBytes(File.ReadAllBytes(settingsPath));
+                var r = doc?.DocumentElement;
+                if (r == null) return (null, null);
+                string sky = XmlText(r, "timeOfDay") ?? XmlText(r, "skyGradientDome");
+                string dome = XmlText(r, "skyDome");
+                return (sky?.Replace('\\', '/'), dome?.Replace('\\', '/'));
+            }
+            catch (Exception e)
+            {
+                WoTLogger.Warn($"Could not read sky references from space.settings: {e.Message}");
+                return (null, null);
+            }
+        }
+
+        private static string XmlText(System.Xml.XmlElement e, string child)
+        {
+            var n = e?.SelectSingleNode(child);
+            string t = n?.InnerText?.Trim();
+            return string.IsNullOrEmpty(t) ? null : t;
         }
 
         private struct SpaceRow

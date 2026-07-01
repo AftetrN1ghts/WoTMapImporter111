@@ -30,9 +30,17 @@ namespace WoTMapImporter.Editor
         private bool _loadVegetation = true;
         private bool _loadFlora = true;
         private float _floraDensity = 0.25f;
+        private bool _floraGpuInstancing = true;
+        private float _floraDrawDistance = 250f;
         private bool _loadNormals = true;
         private bool _loadWetness = false;
         private int _maxResolution = 4097;
+        private int _terrainBakeResolution = 2048;
+        private bool _terrainLiveSplat = false;
+        private float _terrainAOStrength = 0.5f;
+        private bool _loadLighting = true;
+        private bool _useMapStartTime = true;
+        private float _timeOfDay = 12f;
         private WoTMapImporter.TerrainImportMode _terrainMode = WoTMapImporter.TerrainImportMode.MeshChunks;
         private bool _mapsParsed;
         private Vector2 _scroll;
@@ -59,7 +67,15 @@ namespace WoTMapImporter.Editor
             _loadVegetation = EditorPrefs.GetBool("WoTMapImporter.loadVegetation", _loadVegetation);
             _loadFlora = EditorPrefs.GetBool("WoTMapImporter.loadFlora", _loadFlora);
             _floraDensity = EditorPrefs.GetFloat("WoTMapImporter.floraDensity", _floraDensity);
+            _floraGpuInstancing = EditorPrefs.GetBool("WoTMapImporter.floraGpuInstancing", _floraGpuInstancing);
+            _floraDrawDistance = EditorPrefs.GetFloat("WoTMapImporter.floraDrawDistance", _floraDrawDistance);
             _terrainMode = (WoTMapImporter.TerrainImportMode)EditorPrefs.GetInt("WoTMapImporter.terrainMode", (int)_terrainMode);
+            _terrainBakeResolution = EditorPrefs.GetInt("WoTMapImporter.terrainBakeResolution", _terrainBakeResolution);
+            _terrainLiveSplat = EditorPrefs.GetBool("WoTMapImporter.terrainLiveSplat2", _terrainLiveSplat);
+            _terrainAOStrength = EditorPrefs.GetFloat("WoTMapImporter.terrainAOStrength", _terrainAOStrength);
+            _loadLighting = EditorPrefs.GetBool("WoTMapImporter.loadLighting", _loadLighting);
+            _useMapStartTime = EditorPrefs.GetBool("WoTMapImporter.useMapStartTime", _useMapStartTime);
+            _timeOfDay = EditorPrefs.GetFloat("WoTMapImporter.timeOfDay", _timeOfDay);
         }
 
         private void OnDisable()
@@ -71,7 +87,15 @@ namespace WoTMapImporter.Editor
             EditorPrefs.SetBool("WoTMapImporter.loadVegetation", _loadVegetation);
             EditorPrefs.SetBool("WoTMapImporter.loadFlora", _loadFlora);
             EditorPrefs.SetFloat("WoTMapImporter.floraDensity", _floraDensity);
+            EditorPrefs.SetBool("WoTMapImporter.floraGpuInstancing", _floraGpuInstancing);
+            EditorPrefs.SetFloat("WoTMapImporter.floraDrawDistance", _floraDrawDistance);
             EditorPrefs.SetInt("WoTMapImporter.terrainMode", (int)_terrainMode);
+            EditorPrefs.SetInt("WoTMapImporter.terrainBakeResolution", _terrainBakeResolution);
+            EditorPrefs.SetBool("WoTMapImporter.terrainLiveSplat2", _terrainLiveSplat);
+            EditorPrefs.SetFloat("WoTMapImporter.terrainAOStrength", _terrainAOStrength);
+            EditorPrefs.SetBool("WoTMapImporter.loadLighting", _loadLighting);
+            EditorPrefs.SetBool("WoTMapImporter.useMapStartTime", _useMapStartTime);
+            EditorPrefs.SetFloat("WoTMapImporter.timeOfDay", _timeOfDay);
         }
 
         private void OnGUI()
@@ -113,7 +137,17 @@ namespace WoTMapImporter.Editor
             _loadVegetation = EditorGUILayout.Toggle("Load SpeedTree vegetation", _loadVegetation);
             _loadFlora = EditorGUILayout.Toggle("Load ground flora/grass", _loadFlora);
             using (new EditorGUI.DisabledScope(!_loadFlora))
+            {
                 _floraDensity = EditorGUILayout.Slider("Flora density (per m²)", _floraDensity, 0.02f, 2f);
+                _floraGpuInstancing = EditorGUILayout.Toggle(
+                    new GUIContent("Flora GPU instancing",
+                        "Store per-instance matrices and render with GPU instancing instead of baking a combined mesh per chunk. Much smaller on disk."),
+                    _floraGpuInstancing);
+                using (new EditorGUI.DisabledScope(!_floraGpuInstancing))
+                    _floraDrawDistance = EditorGUILayout.Slider(
+                        new GUIContent("Flora draw distance (m)", "Cull flora patches farther than this from the camera. 0 = never cull."),
+                        _floraDrawDistance, 0f, 1000f);
+            }
             using (new EditorGUI.DisabledScope(!_loadTerrain))
             {
                 _loadNormals = EditorGUILayout.Toggle("Load terrain normals", _loadNormals);
@@ -127,11 +161,37 @@ namespace WoTMapImporter.Editor
                         new[] { "1025", "2049", "4097" },
                         new[] { 1025, 2049, 4097 });
                 }
+                using (new EditorGUI.DisabledScope(_terrainMode != WoTMapImporter.TerrainImportMode.MeshChunks))
+                {
+                    _terrainLiveSplat = EditorGUILayout.Toggle("Live-splat terrain (experimental)", _terrainLiveSplat);
+                    _terrainAOStrength = EditorGUILayout.Slider("Terrain AO strength", _terrainAOStrength, 0f, 1f);
+                    using (new EditorGUI.DisabledScope(_terrainLiveSplat))
+                    {
+                        _terrainBakeResolution = EditorGUILayout.IntPopup(
+                            "Baked terrain resolution",
+                            _terrainBakeResolution,
+                            new[] { "512", "1024", "2048", "4096" },
+                            new[] { 512, 1024, 2048, 4096 });
+                    }
+                }
             }
             if (!_loadTerrain)
                 EditorGUILayout.HelpBox("Terrain import is disabled. The importer will still load space.bin static objects if 'Load static objects' is enabled.", MessageType.Info);
             else if (_terrainMode == WoTMapImporter.TerrainImportMode.MeshChunks)
                 EditorGUILayout.HelpBox("MeshChunks uses one MeshRenderer per WoT .cdata chunk and samples original blend textures without Unity Terrain alphamap normalization.", MessageType.Info);
+
+            EditorGUILayout.Space();
+            _loadLighting = EditorGUILayout.Toggle("Import lighting + skybox", _loadLighting);
+            using (new EditorGUI.DisabledScope(!_loadLighting))
+            {
+                _useMapStartTime = EditorGUILayout.Toggle("Use map's own time of day", _useMapStartTime);
+                using (new EditorGUI.DisabledScope(_useMapStartTime))
+                {
+                    _timeOfDay = EditorGUILayout.Slider("Time of day (hour)", _timeOfDay, 0f, 24f);
+                }
+            }
+            if (_loadLighting)
+                EditorGUILayout.HelpBox("Imports the map's original sun, ambient, height-fog and skybox from its day/night cycle. Drag the time-of-day slider to pick the hour (00-24).", MessageType.Info);
         }
 
         private void DrawParseSection()
@@ -327,10 +387,17 @@ namespace WoTMapImporter.Editor
                     LoadVegetation = _loadVegetation,
                     LoadFlora = _loadFlora,
                     FloraDensity = _floraDensity,
+                    FloraGpuInstancing = _floraGpuInstancing,
+                    FloraDrawDistance = _floraDrawDistance,
                     LoadNormals = _loadNormals,
                     LoadWetness = _loadWetness,
                     MaxHeightmapResolution = _maxResolution,
+                    TerrainBakeResolution = _terrainBakeResolution,
+                    TerrainLiveSplat = _terrainLiveSplat,
+                    TerrainAOStrength = _terrainAOStrength,
                     TerrainMode = _terrainMode,
+                    LoadLighting = _loadLighting,
+                    TimeOfDay = _useMapStartTime ? -1f : _timeOfDay,
                 };
 
                 EditorUtility.DisplayProgressBar("WoT Map Importer", "Starting import...", 0f);
