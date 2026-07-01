@@ -14,10 +14,10 @@ Shader "WoT/TerrainChunkBaked"
         _NormalMap      ("Baked Height Normal RGB", 2D) = "bump" {}
         _NormalStrength ("Normal Strength", Float) = 3.0
 
-        // По умолчанию realtime shadows на terrain выключены, потому что большие
-        // mesh chunks часто дают странные полосы/пятна self-shadowing в URP.
-        // Если нужны тени от объектов на землю — можно поднять до 1 в материале.
-        [Range(0,1)] _ReceiveShadows ("Receive Realtime Shadows", Float) = 0
+        // Realtime shadows включены по умолчанию: terrain принимает тени от
+        // объектов и самозатеняется. Полосы/пятна self-shadowing убираются
+        // нормальным bias'ом в ShadowCaster-пассе ниже + shadow bias у Light.
+        [Range(0,1)] _ReceiveShadows ("Receive Realtime Shadows", Float) = 1
         [Range(0,1)] _ShadowStrength ("Shadow Strength", Float) = 0.65
     }
 
@@ -173,10 +173,79 @@ Shader "WoT/TerrainChunkBaked"
             ENDHLSL
         }
 
-        // ShadowCaster pass намеренно отсутствует: terrain mesh chunks больше не
-        // бросают собственные realtime shadows, из-за которых появлялись странные
-        // пятна/полосы. При этом ForwardLit всё ещё может принимать тени, если
-        // поднять _ReceiveShadows выше 0 в материале.
+        // ShadowCaster: terrain отбрасывает тени (в т.ч. на себя). Нормальный и
+        // глубинный bias в ApplyShadowBiasWS убирают полосы/акне self-shadowing.
+        Pass
+        {
+            Name "ShadowCaster"
+            Tags { "LightMode"="ShadowCaster" }
+            ZWrite On ZTest LEqual ColorMask 0
+            Cull Back
+
+            HLSLPROGRAM
+            #pragma vertex ShadowVert
+            #pragma fragment ShadowFrag
+            #pragma target 3.0
+            #pragma multi_compile_instancing
+            #pragma multi_compile_vertex _ _CASTING_PUNCTUAL_LIGHT_SHADOW
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+            float3 _LightDirection;
+            float3 _LightPosition;
+
+            struct ShadowAttr
+            {
+                float4 positionOS : POSITION;
+                float3 normalOS   : NORMAL;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
+            struct ShadowVary
+            {
+                float4 positionCS : SV_POSITION;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
+
+            float3 ApplyShadowBiasWS(float3 posWS, float3 normalWS, float3 lightDir)
+            {
+                float normalBias = 0.06;
+                float depthBias  = 0.002;
+                float invNdotL   = 1.0 - saturate(dot(normalWS, lightDir));
+                posWS += normalWS * invNdotL * normalBias;
+                posWS -= lightDir * depthBias;
+                return posWS;
+            }
+
+            ShadowVary ShadowVert(ShadowAttr IN)
+            {
+                ShadowVary OUT;
+                UNITY_SETUP_INSTANCE_ID(IN);
+
+                float3 posWS = TransformObjectToWorld(IN.positionOS.xyz);
+                float3 nrmWS = TransformObjectToWorldNormal(IN.normalOS);
+
+            #if _CASTING_PUNCTUAL_LIGHT_SHADOW
+                float3 lightDir = normalize(_LightPosition - posWS);
+            #else
+                float3 lightDir = _LightDirection;
+            #endif
+
+                posWS = ApplyShadowBiasWS(posWS, nrmWS, lightDir);
+                float4 posCS = TransformWorldToHClip(posWS);
+
+            #if UNITY_REVERSED_Z
+                posCS.z = min(posCS.z, posCS.w * UNITY_NEAR_CLIP_VALUE);
+            #else
+                posCS.z = max(posCS.z, posCS.w * UNITY_NEAR_CLIP_VALUE);
+            #endif
+
+                OUT.positionCS = posCS;
+                return OUT;
+            }
+
+            half4 ShadowFrag(ShadowVary IN) : SV_Target { return 0; }
+            ENDHLSL
+        }
     }
 
     Fallback Off
