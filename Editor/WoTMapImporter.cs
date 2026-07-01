@@ -39,6 +39,8 @@ namespace WoTMapImporter.Editor
             public bool LoadTerrain = true;
             public bool LoadObjects = true;
             public bool LoadVegetation = true;
+            public bool LoadFlora = true;
+            public float FloraDensity = 0.25f;
             public bool LoadNormals = true;
             public bool LoadWetness = false;
             public int MaxHeightmapResolution = 4097;
@@ -107,7 +109,7 @@ namespace WoTMapImporter.Editor
                 resourcePackages.Insert(0, "particles.pkg");
                 resourcePackages.Insert(0, $"{spaceName}_bin.pkg");
                 resourcePackages.Insert(0, $"{spaceName}.pkg");
-                AddOptionalResourcePackages(wotResPath, resourcePackages);
+                AddOptionalResourcePackages(wotResPath, resourcePackages, spaceName);
                 pkgMgr = new WoTPackageManager(wotResPath, resourcePackages);
 
                 progress?.Invoke(0.15f, "Loading space settings...");
@@ -117,12 +119,16 @@ namespace WoTMapImporter.Editor
                 EnsureAssetFolder(folder);
 
                 GameObject terrainObject = null;
-                if (settings.LoadTerrain)
+                List<TerrainChunk> chunks = null;
+                if (settings.LoadTerrain || settings.LoadFlora)
                 {
                     progress?.Invoke(0.3f, "Loading cdata chunks...");
-                    var chunks = LoadAllChunks(spaceDir, universalTerrain);
+                    chunks = LoadAllChunks(spaceDir, universalTerrain);
+                }
 
-                    if (chunks.Count == 0)
+                if (settings.LoadTerrain)
+                {
+                    if (chunks == null || chunks.Count == 0)
                     {
                         result.Errors.Add("No terrain chunks found at " + spaceDir);
                         return result;
@@ -183,6 +189,26 @@ namespace WoTMapImporter.Editor
                     {
                         WoTLogger.Warn($"Compiled-space content loading failed: {oe.Message}\n{oe.StackTrace}");
                         result.Warnings.Add("Compiled-space content loading failed: " + oe.Message);
+                    }
+                }
+
+                // ---- Procedural ground flora/grass scatter (flora.xml) ----
+                if (settings.LoadFlora && chunks != null && chunks.Count > 0)
+                {
+                    try
+                    {
+                        progress?.Invoke(0.98f, "Scattering ground flora...");
+                        var floraResult = Vegetation.FloraScatterBuilder.Build(
+                            folder, spaceName, universalTerrain, chunks, pkgMgr,
+                            new Vegetation.FloraScatterBuilder.Settings { Density = settings.FloraDensity });
+                        result.Warnings.AddRange(floraResult.Warnings);
+                        if (floraResult.Root != null)
+                            floraResult.Root.transform.SetParent(root.transform, false);
+                    }
+                    catch (Exception fe)
+                    {
+                        WoTLogger.Warn($"Flora scatter failed: {fe.Message}\n{fe.StackTrace}");
+                        result.Warnings.Add("Flora scatter failed: " + fe.Message);
                     }
                 }
 
@@ -257,7 +283,7 @@ namespace WoTMapImporter.Editor
             return list;
         }
 
-        private static void AddOptionalResourcePackages(string wotResPath, List<string> packages)
+        private static void AddOptionalResourcePackages(string wotResPath, List<string> packages, string spaceName)
         {
             if (!Directory.Exists(wotResPath) || packages == null) return;
             var seen = new HashSet<string>(packages, StringComparer.OrdinalIgnoreCase);
@@ -268,6 +294,15 @@ namespace WoTMapImporter.Editor
                 if (!File.Exists(Path.Combine(wotResPath, pkgName))) return;
                 packages.Add(pkgName);
                 seen.Add(pkgName);
+            }
+
+            // The map's own package(s) can hold the map-specific SpeedTree/flora
+            // resources (older maps sometimes split them across <map>_*.pkg), so pull
+            // in every package named after the map, not just <map>.pkg / <map>_bin.pkg.
+            if (!string.IsNullOrEmpty(spaceName))
+            {
+                foreach (var f in Directory.GetFiles(wotResPath, $"{spaceName}*.pkg"))
+                    AddIfExists(Path.GetFileName(f));
             }
 
             // SpeedTree resources are normally in shared*.pkg, but some clients/modded
