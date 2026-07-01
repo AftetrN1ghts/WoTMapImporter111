@@ -47,6 +47,9 @@ namespace WoTMapImporter.Editor
             public bool LoadWetness = false;
             public int MaxHeightmapResolution = 4097;
             public int TerrainBakeResolution = 2048;
+            // Mesh terrain: blend the original WoT tiles live in the shader (sharp,
+            // tiny on disk) instead of baking a big per-chunk albedo texture.
+            public bool TerrainLiveSplat = true;
             public TerrainImportMode TerrainMode = TerrainImportMode.MeshChunks;
         }
 
@@ -145,7 +148,7 @@ namespace WoTMapImporter.Editor
                     {
                         var meshResult = TerrainMeshBuilder.Build(folder, mapInfo, universalTerrain, chunks, pkgMgr,
                                                                   settings.LoadWetness, settings.LoadNormals,
-                                                                  settings.TerrainBakeResolution);
+                                                                  settings.TerrainBakeResolution, settings.TerrainLiveSplat);
                         terrainObject = meshResult.TerrainObject;
                         result.Warnings.AddRange(meshResult.Warnings);
                     }

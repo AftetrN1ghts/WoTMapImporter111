@@ -41,7 +41,8 @@ namespace WoTMapImporter.Editor.Terrain
             WoTPackageManager resMgr,
             bool loadWetness,
             bool loadNormals = true,
-            int bakeResolution = 2048)
+            int bakeResolution = 2048,
+            bool liveSplat = true)
         {
             // Keep the baked albedo a sane power-of-two; guards against silly UI values.
             bakeResolution = Mathf.Clamp(Mathf.ClosestPowerOfTwo(bakeResolution), 512, 4096);
@@ -95,9 +96,15 @@ namespace WoTMapImporter.Editor.Terrain
             WoTLogger.Info($"Mesh terrain UV bounds from chunks: x[{uvMinX}..{uvMaxX}] y[{uvMinY}..{uvMaxY}] " +
                            $"metadata x[{terrain.MinX}..{terrain.MaxX}] y[{terrain.MinY}..{terrain.MaxY}]");
 
-            var shader = Shader.Find("WoT/TerrainChunkBaked");
+            // Live-splat blends the original WoT tile textures + small per-chunk
+            // blend maps in the shader (sharp at any distance, tiny on disk because
+            // tiles are shared/deduped).  Baked flattens everything into one big
+            // per-chunk albedo (heavy on disk, blurry up close) and is kept as an
+            // opt-in fallback for weak GPUs.
+            string shaderName = liveSplat ? "WoT/TerrainChunkMesh" : "WoT/TerrainChunkBaked";
+            var shader = Shader.Find(shaderName);
             if (shader == null)
-                result.Warnings.Add("Shader 'WoT/TerrainChunkBaked' not found. Chunks will use URP/Standard material fallback.");
+                result.Warnings.Add($"Shader '{shaderName}' not found. Chunks will use URP/Standard material fallback.");
 
             int built = 0, skipped = 0;
             foreach (var chunk in chunks)
@@ -116,8 +123,11 @@ namespace WoTMapImporter.Editor.Terrain
                     SaveAsset(mesh, meshPath);
                     mesh = AssetDatabase.LoadAssetAtPath<UnityMesh>(meshPath) ?? mesh;
 
-                    Material mat = BuildBakedChunkMaterial(shader, outputPath, mapInfo.Name, terrain, chunk, resMgr, globalMap,
-                                                       uvMinX, uvMaxX, uvMinY, uvMaxY, loadNormals, bakeResolution);
+                    Material mat = liveSplat
+                        ? BuildChunkMaterial(shader, outputPath, mapInfo.Name, terrain, chunk, resMgr, globalMap,
+                                             uvMinX, uvMaxX, uvMinY, uvMaxY, loadNormals)
+                        : BuildBakedChunkMaterial(shader, outputPath, mapInfo.Name, terrain, chunk, resMgr, globalMap,
+                                             uvMinX, uvMaxX, uvMinY, uvMaxY, loadNormals, bakeResolution);
 
                     var go = new GameObject(chunk.ChunkName + "_TerrainMesh");
                     go.transform.position = new Vector3(chunk.ChunkPos.x, 0f, chunk.ChunkPos.y);
@@ -650,7 +660,8 @@ namespace WoTMapImporter.Editor.Terrain
             int uvMinX,
             int uvMaxX,
             int uvMinY,
-            int uvMaxY)
+            int uvMaxY,
+            bool loadNormals)
         {
             Material mat;
             if (shader != null)
@@ -678,6 +689,7 @@ namespace WoTMapImporter.Editor.Terrain
             // Load and bind layer tile textures.
             int layerCount = Mathf.Min(chunk.Layers.Count, 16);
             int loaded = 0, missing = 0;
+            bool anyNormal = false;
             for (int i = 0; i < layerCount; i++)
             {
                 var layer = chunk.Layers[i];
@@ -693,7 +705,21 @@ namespace WoTMapImporter.Editor.Terrain
                     mat.SetTexture("_Splat" + i, Texture2D.whiteTexture);
                     WoTLogger.Warn($"Chunk {chunk.ChunkName}: layer texture not found: {layer.Name}");
                 }
+
+                // Per-layer tiled normal map (deduped by name into the shared
+                // Textures folder, linear import).  Gives real surface detail
+                // that follows the same tiling as the diffuse tile.
+                if (loadNormals && !string.IsNullOrEmpty(layer.NameNm))
+                {
+                    Texture2D nrm = LoadLayerTexture(resMgr, outputPath, mapName, chunk.ChunkName, i, layer.NameNm, true);
+                    if (nrm != null)
+                    {
+                        mat.SetTexture("_Normal" + i, nrm);
+                        anyNormal = true;
+                    }
+                }
             }
+            mat.SetFloat("_UseNormalMaps", loadNormals && anyNormal ? 1f : 0f);
 
             var layerU = new Vector4[16];
             var layerV = new Vector4[16];

@@ -36,6 +36,7 @@ namespace WoTMapImporter.Editor
         private bool _loadWetness = false;
         private int _maxResolution = 4097;
         private int _terrainBakeResolution = 2048;
+        private bool _terrainLiveSplat = true;
         private WoTMapImporter.TerrainImportMode _terrainMode = WoTMapImporter.TerrainImportMode.MeshChunks;
         private bool _mapsParsed;
         private Vector2 _scroll;
@@ -66,6 +67,7 @@ namespace WoTMapImporter.Editor
             _floraDrawDistance = EditorPrefs.GetFloat("WoTMapImporter.floraDrawDistance", _floraDrawDistance);
             _terrainMode = (WoTMapImporter.TerrainImportMode)EditorPrefs.GetInt("WoTMapImporter.terrainMode", (int)_terrainMode);
             _terrainBakeResolution = EditorPrefs.GetInt("WoTMapImporter.terrainBakeResolution", _terrainBakeResolution);
+            _terrainLiveSplat = EditorPrefs.GetBool("WoTMapImporter.terrainLiveSplat", _terrainLiveSplat);
         }
 
         private void OnDisable()
@@ -81,6 +83,7 @@ namespace WoTMapImporter.Editor
             EditorPrefs.SetFloat("WoTMapImporter.floraDrawDistance", _floraDrawDistance);
             EditorPrefs.SetInt("WoTMapImporter.terrainMode", (int)_terrainMode);
             EditorPrefs.SetInt("WoTMapImporter.terrainBakeResolution", _terrainBakeResolution);
+            EditorPrefs.SetBool("WoTMapImporter.terrainLiveSplat", _terrainLiveSplat);
         }
 
         private void OnGUI()
@@ -148,11 +151,15 @@ namespace WoTMapImporter.Editor
                 }
                 using (new EditorGUI.DisabledScope(_terrainMode != WoTMapImporter.TerrainImportMode.MeshChunks))
                 {
-                    _terrainBakeResolution = EditorGUILayout.IntPopup(
-                        "Terrain bake resolution",
-                        _terrainBakeResolution,
-                        new[] { "512", "1024", "2048", "4096" },
-                        new[] { 512, 1024, 2048, 4096 });
+                    _terrainLiveSplat = EditorGUILayout.Toggle("Live-splat terrain (recommended)", _terrainLiveSplat);
+                    using (new EditorGUI.DisabledScope(_terrainLiveSplat))
+                    {
+                        _terrainBakeResolution = EditorGUILayout.IntPopup(
+                            "Baked terrain resolution",
+                            _terrainBakeResolution,
+                            new[] { "512", "1024", "2048", "4096" },
+                            new[] { 512, 1024, 2048, 4096 });
+                    }
                 }
             }
             if (!_loadTerrain)
@@ -360,6 +367,7 @@ namespace WoTMapImporter.Editor
                     LoadWetness = _loadWetness,
                     MaxHeightmapResolution = _maxResolution,
                     TerrainBakeResolution = _terrainBakeResolution,
+                    TerrainLiveSplat = _terrainLiveSplat,
                     TerrainMode = _terrainMode,
                 };
 
