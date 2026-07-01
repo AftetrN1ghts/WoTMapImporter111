@@ -57,6 +57,7 @@ namespace WoTMapImporter.Editor.Vegetation
 
         private static readonly string[] ConvertedExtensions = { ".prefab", ".fbx", ".st", ".spm" };
         private static readonly string[] TextureExtensions = { ".dds", ".png", ".tga", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff" };
+        private const bool CreateMissingVegetationPlaceholders = false;
 
         public static BuildResult Build(
             string outputPath,
@@ -142,11 +143,35 @@ namespace WoTMapImporter.Editor.Vegetation
                     species.AssetPath = rawAssetPath;
                     CopySidecarTexturesOnce(ctx, resolvedResource);
 
-                    // Preferred path for original WoT trees: decode the runtime
-                    // SpeedTree .srt geometry ourselves.  Unity's built-in importer
-                    // usually does not understand WoT runtime .srt files.
-                    if (resolvedResource.EndsWith(".srt", StringComparison.OrdinalIgnoreCase) &&
-                        rawBytes != null && SrtMeshDecoder.IsSrt(rawBytes))
+                    // Preferred paths for original WoT trees:
+                    //   - 0.8.x may keep renderable meshes in shared_content.pkg under
+                    //     flora/<plant_name>/*.primitives(_processed), while the chunk
+                    //     references speedtree/<map>/<plant>.spt. Try flora first.
+                    //   - 1.0+ usually uses SpeedTree runtime *.srt.
+                    //   - *.ctree decoder is kept as optional/experimental fallback.
+                    var floraImport = FloraPrimitiveDecoder.ImportToPrefab(ctx.OutputPath, resource, ctx.ResMgr);
+                    if (floraImport.Prefab != null)
+                    {
+                        species.Prefab = floraImport.Prefab;
+                        species.AssetPath = AssetDatabase.GetAssetPath(floraImport.Prefab);
+                    }
+                    foreach (var w in floraImport.Warnings)
+                        ctx.Result.Warnings.Add(w);
+
+                    if (species.Prefab == null && resolvedResource.EndsWith(".ctree", StringComparison.OrdinalIgnoreCase) &&
+                        rawBytes != null && CtreeMeshDecoder.IsCtree(rawBytes))
+                    {
+                        var ctreeImport = CtreeMeshDecoder.ImportToPrefab(ctx.OutputPath, resolvedResource, rawBytes, ctx.ResMgr);
+                        if (ctreeImport.Prefab != null)
+                        {
+                            species.Prefab = ctreeImport.Prefab;
+                            species.AssetPath = AssetDatabase.GetAssetPath(ctreeImport.Prefab);
+                        }
+                        foreach (var w in ctreeImport.Warnings)
+                            ctx.Result.Warnings.Add(w);
+                    }
+                    else if (species.Prefab == null && resolvedResource.EndsWith(".srt", StringComparison.OrdinalIgnoreCase) &&
+                             rawBytes != null && SrtMeshDecoder.IsSrt(rawBytes))
                     {
                         var srtImport = SrtMeshDecoder.ImportToPrefab(ctx.OutputPath, resolvedResource, rawBytes, ctx.ResMgr);
                         if (srtImport.Prefab != null)
@@ -180,6 +205,13 @@ namespace WoTMapImporter.Editor.Vegetation
 
             if (species.Prefab == null)
             {
+                if (!CreateMissingVegetationPlaceholders)
+                {
+                    WarnSpeciesOnce(ctx, resource, "No Unity-importable SpeedTree asset found for " + resource + "; skipped");
+                    ctx.SpeciesCache[resource] = null;
+                    return null;
+                }
+
                 species.Prefab = CreatePlaceholderPrefab(ctx, resource);
                 species.AssetPath = AssetDatabase.GetAssetPath(species.Prefab);
                 species.IsPlaceholder = true;
@@ -430,8 +462,11 @@ namespace WoTMapImporter.Editor.Vegetation
 
         private static bool IsGeneratedDecodedSrtPath(string assetPath)
         {
-            return !string.IsNullOrEmpty(assetPath) &&
-                   assetPath.Replace('\\', '/').IndexOf("/VegetationAssets/_DecodedSRT/", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (string.IsNullOrEmpty(assetPath)) return false;
+            string p = assetPath.Replace('\\', '/');
+            return p.IndexOf("/VegetationAssets/_DecodedSRT/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   p.IndexOf("/VegetationAssets/_DecodedCTREE/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   p.IndexOf("/VegetationAssets/_DecodedFlora/", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static string CopyResourceToAssets(BuildContext ctx, string resource, out string resolvedResource, out byte[] rawBytes)
@@ -488,21 +523,28 @@ namespace WoTMapImporter.Editor.Vegetation
             string n = NormalizeResource(resource);
             string baseNoExt = RemoveExtension(n);
 
+            // Old maps usually store <spt>AppleTree.spt</spt> in chunk XML,
+            // while the actually renderable, already-compiled resource is the sibling
+            // AppleTree.ctree.  Prefer it before falling back to DLL-based *.spt.
+            yield return baseNoExt + ".ctree";
             yield return baseNoExt + ".srt";
             yield return baseNoExt + ".fbx";
             yield return baseNoExt + ".prefab";
             yield return baseNoExt + ".st";
             yield return baseNoExt + ".spm";
+            yield return baseNoExt + ".spt";
             yield return n;
 
             if (!n.StartsWith("content/", StringComparison.OrdinalIgnoreCase))
             {
                 string cn = "content/" + baseNoExt;
+                yield return cn + ".ctree";
                 yield return cn + ".srt";
                 yield return cn + ".fbx";
                 yield return cn + ".prefab";
                 yield return cn + ".st";
                 yield return cn + ".spm";
+                yield return cn + ".spt";
                 yield return "content/" + n;
             }
         }

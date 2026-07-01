@@ -33,6 +33,7 @@ namespace WoTMapImporter.Editor.Vegetation
         [StructLayout(LayoutKind.Sequential, Pack = 4)]
         public struct SLeaf
         {
+            [MarshalAs(UnmanagedType.I1)]
             public bool m_bIsActive;
             public byte m_bPad1, m_bPad2, m_bPad3;
             public float m_fAlphaTestValue;
@@ -57,6 +58,7 @@ namespace WoTMapImporter.Editor.Vegetation
         [StructLayout(LayoutKind.Sequential, Pack = 4)]
         public struct SBillboard
         {
+            [MarshalAs(UnmanagedType.I1)]
             public bool m_bIsActive;
             public byte m_bPad1, m_bPad2, m_bPad3;
             public IntPtr m_pTexCoords;
@@ -94,13 +96,15 @@ namespace WoTMapImporter.Editor.Vegetation
         public delegate void CSpeedTreeRT_Constructor(IntPtr pThis);
 
         [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+        [return: MarshalAs(UnmanagedType.I1)]
         public delegate bool CSpeedTreeRT_LoadTree(IntPtr pThis, [MarshalAs(UnmanagedType.LPStr)] string pFilename);
 
         [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
-        public delegate bool CSpeedTreeRT_Compute(IntPtr pThis, IntPtr pTransform, uint nSeed, bool bCompositeStrips);
+        [return: MarshalAs(UnmanagedType.I1)]
+        public delegate bool CSpeedTreeRT_Compute(IntPtr pThis, IntPtr pTransform, uint nSeed, [MarshalAs(UnmanagedType.I1)] bool bCompositeStrips);
 
         [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
-        public delegate void CSpeedTreeRT_GetGeometry(IntPtr pThis, IntPtr pGeom, uint ulBitVector, short nBranchLodOverride, short nFrondLodOverride, short nLeafLodOverride);
+        public delegate void CSpeedTreeRT_GetGeometry(IntPtr pThis, IntPtr pGeom, uint ulBitVector, float fBranchLodOverride, float fFrondLodOverride, float fLeafLodOverride);
 
         [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
         public delegate void CSpeedTreeRT_GetTextures(IntPtr pThis, IntPtr pTextures);
@@ -132,11 +136,11 @@ namespace WoTMapImporter.Editor.Vegetation
         {
             if (args.Length < 3)
             {
-                Console.WriteLine("Usage: SptDumper <sptPath> <objPath> <speedTreeDllPath>");
+                Console.WriteLine("Usage: SptDumper <treePath.spt|ctree> <objPath> <speedTreeDllPath>");
                 return;
             }
 
-            string sptPath = args[0];
+            string treePath = args[0];
             string objPath = args[1];
             string dllPath = args[2];
 
@@ -157,9 +161,9 @@ namespace WoTMapImporter.Editor.Vegetation
             IntPtr pGeomConst = GetProcAddress(hMod, "??0SGeometry@CSpeedTreeRT@@QAE@XZ");
             IntPtr pTexConst  = GetProcAddress(hMod, "??0STextures@CSpeedTreeRT@@QAE@XZ");
 
-            if (pConstruct == IntPtr.Zero || pLoadTree == IntPtr.Zero || pCompute == IntPtr.Zero || pGetGeom == IntPtr.Zero)
+            if (pConstruct == IntPtr.Zero || pLoadTree == IntPtr.Zero || pCompute == IntPtr.Zero || pGetGeom == IntPtr.Zero || pDestruct == IntPtr.Zero || pGeomConst == IntPtr.Zero)
             {
-                Console.WriteLine("SptDumper: Failed to find CSpeedTreeRT exports in DLL");
+                Console.WriteLine("SptDumper: Failed to find required CSpeedTreeRT exports in DLL");
                 return;
             }
 
@@ -167,19 +171,19 @@ namespace WoTMapImporter.Editor.Vegetation
             var fnLoadTree  = (CSpeedTreeRT_LoadTree)Marshal.GetDelegateForFunctionPointer(pLoadTree, typeof(CSpeedTreeRT_LoadTree));
             var fnCompute   = (CSpeedTreeRT_Compute)Marshal.GetDelegateForFunctionPointer(pCompute, typeof(CSpeedTreeRT_Compute));
             var fnGetGeom   = (CSpeedTreeRT_GetGeometry)Marshal.GetDelegateForFunctionPointer(pGetGeom, typeof(CSpeedTreeRT_GetGeometry));
-            var fnGetTex    = (CSpeedTreeRT_GetTextures)Marshal.GetDelegateForFunctionPointer(pGetTex, typeof(CSpeedTreeRT_GetTextures));
+            var fnGetTex    = pGetTex != IntPtr.Zero ? (CSpeedTreeRT_GetTextures)Marshal.GetDelegateForFunctionPointer(pGetTex, typeof(CSpeedTreeRT_GetTextures)) : null;
             var fnDestruct  = (CSpeedTreeRT_Destructor)Marshal.GetDelegateForFunctionPointer(pDestruct, typeof(CSpeedTreeRT_Destructor));
             var fnGeomConst = (SGeometry_Constructor)Marshal.GetDelegateForFunctionPointer(pGeomConst, typeof(SGeometry_Constructor));
-            var fnTexConst  = (STextures_Constructor)Marshal.GetDelegateForFunctionPointer(pTexConst, typeof(STextures_Constructor));
+            var fnTexConst  = pTexConst != IntPtr.Zero ? (STextures_Constructor)Marshal.GetDelegateForFunctionPointer(pTexConst, typeof(STextures_Constructor)) : null;
 
-            IntPtr pTree = Marshal.AllocHGlobal(4096);
+            IntPtr pTree = Marshal.AllocHGlobal(64 * 1024);
             fnConstruct(pTree);
 
-            Console.WriteLine("SptDumper: Loading tree " + sptPath);
-            bool loaded = fnLoadTree(pTree, sptPath);
+            Console.WriteLine("SptDumper: Loading tree " + treePath);
+            bool loaded = fnLoadTree(pTree, treePath);
             if (!loaded)
             {
-                Console.WriteLine("SptDumper: LoadTree failed for " + sptPath);
+                Console.WriteLine("SptDumper: LoadTree failed for " + treePath);
                 fnDestruct(pTree);
                 Marshal.FreeHGlobal(pTree);
                 return;
@@ -188,15 +192,20 @@ namespace WoTMapImporter.Editor.Vegetation
             Console.WriteLine("SptDumper: Computing geometry");
             fnCompute(pTree, IntPtr.Zero, 1, true);
 
-            IntPtr pGeom = Marshal.AllocHGlobal(4096);
+            IntPtr pGeom = Marshal.AllocHGlobal(64 * 1024);
             fnGeomConst(pGeom);
-            fnGetGeom(pTree, pGeom, 0xFFFF, -1, -1, -1);
+            fnGetGeom(pTree, pGeom, 0xFFFF, -1.0f, -1.0f, -1.0f);
             SGeometry sGeom = (SGeometry)Marshal.PtrToStructure(pGeom, typeof(SGeometry));
 
-            IntPtr pTex = Marshal.AllocHGlobal(1024);
-            fnTexConst(pTex);
-            fnGetTex(pTree, pTex);
-            STextures sTex = (STextures)Marshal.PtrToStructure(pTex, typeof(STextures));
+            IntPtr pTex = Marshal.AllocHGlobal(4096);
+            STextures sTex = new STextures();
+            if (fnGetTex != null)
+            {
+                if (fnTexConst != null) fnTexConst(pTex);
+                else for (int i = 0; i < 4096; i++) Marshal.WriteByte(pTex, i, 0);
+                fnGetTex(pTree, pTex);
+                sTex = (STextures)Marshal.PtrToStructure(pTex, typeof(STextures));
+            }
 
             string branchTex = sTex.m_pBranchTextureFilename != IntPtr.Zero ? Marshal.PtrToStringAnsi(sTex.m_pBranchTextureFilename) : "branch_diffuse.dds";
             string frondTex  = sTex.m_uiFrondTextureCount > 0 && sTex.m_pFrondTextureFilenames != IntPtr.Zero ? Marshal.PtrToStringAnsi(Marshal.ReadIntPtr(sTex.m_pFrondTextureFilenames, 0)) : "frond_diffuse.dds";

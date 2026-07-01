@@ -1,0 +1,349 @@
+diff --git a/Editor/Vegetation/SptDumper.cs b/Editor/Vegetation/SptDumper.cs
+index 0ebb2b1..f5d4d8a 100644
+--- a/Editor/Vegetation/SptDumper.cs
++++ b/Editor/Vegetation/SptDumper.cs
+@@ -33,6 +33,7 @@ namespace WoTMapImporter.Editor.Vegetation
+         [StructLayout(LayoutKind.Sequential, Pack = 4)]
+         public struct SLeaf
+         {
++            [MarshalAs(UnmanagedType.I1)]
+             public bool m_bIsActive;
+             public byte m_bPad1, m_bPad2, m_bPad3;
+             public float m_fAlphaTestValue;
+@@ -57,6 +58,7 @@ namespace WoTMapImporter.Editor.Vegetation
+         [StructLayout(LayoutKind.Sequential, Pack = 4)]
+         public struct SBillboard
+         {
++            [MarshalAs(UnmanagedType.I1)]
+             public bool m_bIsActive;
+             public byte m_bPad1, m_bPad2, m_bPad3;
+             public IntPtr m_pTexCoords;
+@@ -94,13 +96,15 @@ namespace WoTMapImporter.Editor.Vegetation
+         public delegate void CSpeedTreeRT_Constructor(IntPtr pThis);
+ 
+         [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
++        [return: MarshalAs(UnmanagedType.I1)]
+         public delegate bool CSpeedTreeRT_LoadTree(IntPtr pThis, [MarshalAs(UnmanagedType.LPStr)] string pFilename);
+ 
+         [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+-        public delegate bool CSpeedTreeRT_Compute(IntPtr pThis, IntPtr pTransform, uint nSeed, bool bCompositeStrips);
++        [return: MarshalAs(UnmanagedType.I1)]
++        public delegate bool CSpeedTreeRT_Compute(IntPtr pThis, IntPtr pTransform, uint nSeed, [MarshalAs(UnmanagedType.I1)] bool bCompositeStrips);
+ 
+         [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+-        public delegate void CSpeedTreeRT_GetGeometry(IntPtr pThis, IntPtr pGeom, uint ulBitVector, short nBranchLodOverride, short nFrondLodOverride, short nLeafLodOverride);
++        public delegate void CSpeedTreeRT_GetGeometry(IntPtr pThis, IntPtr pGeom, uint ulBitVector, float fBranchLodOverride, float fFrondLodOverride, float fLeafLodOverride);
+ 
+         [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+         public delegate void CSpeedTreeRT_GetTextures(IntPtr pThis, IntPtr pTextures);
+@@ -132,11 +136,11 @@ namespace WoTMapImporter.Editor.Vegetation
+         {
+             if (args.Length < 3)
+             {
+-                Console.WriteLine("Usage: SptDumper <sptPath> <objPath> <speedTreeDllPath>");
++                Console.WriteLine("Usage: SptDumper <treePath.spt|ctree> <objPath> <speedTreeDllPath>");
+                 return;
+             }
+ 
+-            string sptPath = args[0];
++            string treePath = args[0];
+             string objPath = args[1];
+             string dllPath = args[2];
+ 
+@@ -157,9 +161,9 @@ namespace WoTMapImporter.Editor.Vegetation
+             IntPtr pGeomConst = GetProcAddress(hMod, "??0SGeometry@CSpeedTreeRT@@QAE@XZ");
+             IntPtr pTexConst  = GetProcAddress(hMod, "??0STextures@CSpeedTreeRT@@QAE@XZ");
+ 
+-            if (pConstruct == IntPtr.Zero || pLoadTree == IntPtr.Zero || pCompute == IntPtr.Zero || pGetGeom == IntPtr.Zero)
++            if (pConstruct == IntPtr.Zero || pLoadTree == IntPtr.Zero || pCompute == IntPtr.Zero || pGetGeom == IntPtr.Zero || pDestruct == IntPtr.Zero || pGeomConst == IntPtr.Zero)
+             {
+-                Console.WriteLine("SptDumper: Failed to find CSpeedTreeRT exports in DLL");
++                Console.WriteLine("SptDumper: Failed to find required CSpeedTreeRT exports in DLL");
+                 return;
+             }
+ 
+@@ -167,19 +171,19 @@ namespace WoTMapImporter.Editor.Vegetation
+             var fnLoadTree  = (CSpeedTreeRT_LoadTree)Marshal.GetDelegateForFunctionPointer(pLoadTree, typeof(CSpeedTreeRT_LoadTree));
+             var fnCompute   = (CSpeedTreeRT_Compute)Marshal.GetDelegateForFunctionPointer(pCompute, typeof(CSpeedTreeRT_Compute));
+             var fnGetGeom   = (CSpeedTreeRT_GetGeometry)Marshal.GetDelegateForFunctionPointer(pGetGeom, typeof(CSpeedTreeRT_GetGeometry));
+-            var fnGetTex    = (CSpeedTreeRT_GetTextures)Marshal.GetDelegateForFunctionPointer(pGetTex, typeof(CSpeedTreeRT_GetTextures));
++            var fnGetTex    = pGetTex != IntPtr.Zero ? (CSpeedTreeRT_GetTextures)Marshal.GetDelegateForFunctionPointer(pGetTex, typeof(CSpeedTreeRT_GetTextures)) : null;
+             var fnDestruct  = (CSpeedTreeRT_Destructor)Marshal.GetDelegateForFunctionPointer(pDestruct, typeof(CSpeedTreeRT_Destructor));
+             var fnGeomConst = (SGeometry_Constructor)Marshal.GetDelegateForFunctionPointer(pGeomConst, typeof(SGeometry_Constructor));
+-            var fnTexConst  = (STextures_Constructor)Marshal.GetDelegateForFunctionPointer(pTexConst, typeof(STextures_Constructor));
++            var fnTexConst  = pTexConst != IntPtr.Zero ? (STextures_Constructor)Marshal.GetDelegateForFunctionPointer(pTexConst, typeof(STextures_Constructor)) : null;
+ 
+-            IntPtr pTree = Marshal.AllocHGlobal(4096);
++            IntPtr pTree = Marshal.AllocHGlobal(64 * 1024);
+             fnConstruct(pTree);
+ 
+-            Console.WriteLine("SptDumper: Loading tree " + sptPath);
+-            bool loaded = fnLoadTree(pTree, sptPath);
++            Console.WriteLine("SptDumper: Loading tree " + treePath);
++            bool loaded = fnLoadTree(pTree, treePath);
+             if (!loaded)
+             {
+-                Console.WriteLine("SptDumper: LoadTree failed for " + sptPath);
++                Console.WriteLine("SptDumper: LoadTree failed for " + treePath);
+                 fnDestruct(pTree);
+                 Marshal.FreeHGlobal(pTree);
+                 return;
+@@ -188,15 +192,20 @@ namespace WoTMapImporter.Editor.Vegetation
+             Console.WriteLine("SptDumper: Computing geometry");
+             fnCompute(pTree, IntPtr.Zero, 1, true);
+ 
+-            IntPtr pGeom = Marshal.AllocHGlobal(4096);
++            IntPtr pGeom = Marshal.AllocHGlobal(64 * 1024);
+             fnGeomConst(pGeom);
+-            fnGetGeom(pTree, pGeom, 0xFFFF, -1, -1, -1);
++            fnGetGeom(pTree, pGeom, 0xFFFF, -1.0f, -1.0f, -1.0f);
+             SGeometry sGeom = (SGeometry)Marshal.PtrToStructure(pGeom, typeof(SGeometry));
+ 
+-            IntPtr pTex = Marshal.AllocHGlobal(1024);
+-            fnTexConst(pTex);
+-            fnGetTex(pTree, pTex);
+-            STextures sTex = (STextures)Marshal.PtrToStructure(pTex, typeof(STextures));
++            IntPtr pTex = Marshal.AllocHGlobal(4096);
++            STextures sTex = new STextures();
++            if (fnGetTex != null)
++            {
++                if (fnTexConst != null) fnTexConst(pTex);
++                else for (int i = 0; i < 4096; i++) Marshal.WriteByte(pTex, i, 0);
++                fnGetTex(pTree, pTex);
++                sTex = (STextures)Marshal.PtrToStructure(pTex, typeof(STextures));
++            }
+ 
+             string branchTex = sTex.m_pBranchTextureFilename != IntPtr.Zero ? Marshal.PtrToStringAnsi(sTex.m_pBranchTextureFilename) : "branch_diffuse.dds";
+             string frondTex  = sTex.m_uiFrondTextureCount > 0 && sTex.m_pFrondTextureFilenames != IntPtr.Zero ? Marshal.PtrToStringAnsi(Marshal.ReadIntPtr(sTex.m_pFrondTextureFilenames, 0)) : "frond_diffuse.dds";
+diff --git a/Editor/Vegetation/VegetationBuilder.cs b/Editor/Vegetation/VegetationBuilder.cs
+index 1dac397..147d4b0 100644
+--- a/Editor/Vegetation/VegetationBuilder.cs
++++ b/Editor/Vegetation/VegetationBuilder.cs
+@@ -5,6 +5,7 @@ using UnityEditor;
+ using UnityEngine;
+ using UnityEngine.Rendering;
+ using WoTMapImporter.Editor.Package;
++using WoTMapImporter.Editor.Image;
+ using WoTMapImporter.Editor.Utils;
+ 
+ namespace WoTMapImporter.Editor.Vegetation
+@@ -13,7 +14,7 @@ namespace WoTMapImporter.Editor.Vegetation
+     /// Builds the SpeedTree/vegetation hierarchy from compiled-space SpTr records.
+     ///
+     /// WoT stores placed vegetation in the SpTr section of space.bin.  Modern maps
+-    /// usually reference SpeedTree runtime files (*.srt).  Unity's native SpeedTree
++    /// usually reference SpeedTree runtime files (*.srt); older maps may use *.spt or compiled *.ctree files.  Unity's native SpeedTree
+     /// importer handles Unity-exported *.st/*.spm assets, while WoT's *.srt files may
+     /// not be directly importable in every Unity version/project.  Therefore this
+     /// builder does three things:
+@@ -116,7 +117,7 @@ namespace WoTMapImporter.Editor.Vegetation
+             {
+                 ctx.Result.Warnings.Add(
+                     "Some WoT SpeedTree files could not be loaded as Unity GameObjects and were replaced with green billboard placeholders. " +
+-                    "Convert the corresponding .srt/.spt trees to Unity-compatible .st/.spm/.fbx/prefab assets with the same base name under the copied VegetationAssets folder, then import again.");
++                    "Convert the corresponding .srt/.spt/.ctree trees to Unity-compatible .st/.spm/.fbx/prefab assets with the same base name under the copied VegetationAssets folder, then import again.");
+             }
+             return ctx.Result;
+         }
+@@ -157,9 +158,9 @@ namespace WoTMapImporter.Editor.Vegetation
+                         foreach (var w in srtImport.Warnings)
+                             ctx.Result.Warnings.Add(w);
+                     }
+-                    else if (resolvedResource.EndsWith(".spt", StringComparison.OrdinalIgnoreCase))
++                    else if (CanLoadWithSpeedTreeRt(resolvedResource))
+                     {
+-                        species.Prefab = TryImportSptViaDumper(ctx, rawAssetPath, resolvedResource);
++                        species.Prefab = TryImportSpeedTreeRtViaDumper(ctx, rawAssetPath, resolvedResource);
+                         if (species.Prefab != null) species.AssetPath = AssetDatabase.GetAssetPath(species.Prefab);
+                     }
+ 
+@@ -190,11 +191,11 @@ namespace WoTMapImporter.Editor.Vegetation
+             return species;
+         }
+ 
+-        private static GameObject TryImportSptViaDumper(BuildContext ctx, string sptAssetPath, string resolvedResource)
++        private static GameObject TryImportSpeedTreeRtViaDumper(BuildContext ctx, string treeAssetPath, string resolvedResource)
+         {
+             try
+             {
+-                string fullSpt = ToFullProjectPath(sptAssetPath);
++                string fullTree = ToFullProjectPath(treeAssetPath);
+                 string rootDir = $"{ctx.OutputPath}/VegetationAssets/_DecodedSPT/{SafeAssetName(PathName(resolvedResource))}_{StableHash32(resolvedResource):X8}".Replace('\\', '/');
+                 EnsureFolder(rootDir);
+ 
+@@ -242,24 +243,12 @@ namespace WoTMapImporter.Editor.Vegetation
+ 
+                 if (File.Exists(dumperExe))
+                 {
+-                    string dllPath = "";
+-                    string unpackDir = ctx.ResMgr.UnpackDir;
+-                    if (!string.IsNullOrEmpty(unpackDir))
+-                    {
+-                        string gameRoot = Path.GetDirectoryName(unpackDir);
+-                        dllPath = Path.Combine(gameRoot, "SpeedTreeRT.dll");
+-                        if (!File.Exists(dllPath)) dllPath = Path.Combine(gameRoot, "SpeedTreeRT_wo.dll");
+-                        if (!File.Exists(dllPath)) dllPath = Path.Combine(gameRoot, "SpeedTreeRT_wo_32.dll");
+-                    }
+-                    if (string.IsNullOrEmpty(dllPath) || !File.Exists(dllPath))
+-                    {
+-                        dllPath = "SpeedTreeRT.dll";
+-                    }
++                    string dllPath = FindSpeedTreeRtDll(ctx.ResMgr.UnpackDir);
+ 
+                     var psi = new System.Diagnostics.ProcessStartInfo
+                     {
+                         FileName = dumperExe,
+-                        Arguments = $"\"{fullSpt}\" \"{fullObj}\" \"{dllPath}\"",
++                        Arguments = $"\"{fullTree}\" \"{fullObj}\" \"{dllPath}\"",
+                         UseShellExecute = false,
+                         CreateNoWindow = true,
+                         RedirectStandardOutput = true,
+@@ -291,11 +280,14 @@ namespace WoTMapImporter.Editor.Vegetation
+                                 string matName = mr.sharedMaterial.name;
+                                 Shader sh = Shader.Find("WoT/ObjectPBS") ?? Shader.Find("Universal Render Pipeline/Lit");
+                                 var newMat = new Material(sh) { name = matName };
+-                                if (mr.sharedMaterial.mainTexture != null)
++                                Texture tex = mr.sharedMaterial.mainTexture;
++                                if (tex == null)
++                                    tex = LoadSpeedTreeRtTexture(rootDir, resolvedResource, matName, ctx.ResMgr);
++                                if (tex != null)
+                                 {
+-                                    newMat.mainTexture = mr.sharedMaterial.mainTexture;
+-                                    newMat.SetTexture("_BaseMap", mr.sharedMaterial.mainTexture);
+-                                    newMat.SetTexture("_MainTex", mr.sharedMaterial.mainTexture);
++                                    newMat.mainTexture = tex;
++                                    if (newMat.HasProperty("_BaseMap")) newMat.SetTexture("_BaseMap", tex);
++                                    if (newMat.HasProperty("_MainTex")) newMat.SetTexture("_MainTex", tex);
+                                 }
+                                 newMat.SetFloat("_AlphaClip", 1f);
+                                 newMat.SetFloat("_Cutoff", 0.35f);
+@@ -324,6 +316,111 @@ namespace WoTMapImporter.Editor.Vegetation
+             return null;
+         }
+ 
++        private static string FindSpeedTreeRtDll(string unpackDir)
++        {
++            string[] dllNames =
++            {
++                "SpeedTreeRT_wo_32.dll", "SpeedTreeRT_wo.dll", "SpeedTreeRT.dll",
++                "speedtreert_wo_32.dll", "speedtreert_wo.dll", "speedtreert.dll"
++            };
++
++            var dirs = new List<string>();
++            if (!string.IsNullOrEmpty(unpackDir))
++            {
++                string cur = unpackDir;
++                for (int i = 0; i < 4 && !string.IsNullOrEmpty(cur); i++)
++                {
++                    dirs.Add(cur);
++                    dirs.Add(Path.Combine(cur, "bin32"));
++                    dirs.Add(Path.Combine(cur, "win32"));
++                    dirs.Add(Path.Combine(cur, "x86"));
++                    cur = Path.GetDirectoryName(cur);
++                }
++            }
++            dirs.Add(Environment.CurrentDirectory);
++
++            foreach (string dir in dirs)
++            {
++                if (string.IsNullOrEmpty(dir)) continue;
++                foreach (string name in dllNames)
++                {
++                    string path = Path.Combine(dir, name);
++                    if (File.Exists(path)) return path;
++                }
++            }
++
++            // Let Windows DLL search path try PATH/current directory as a final fallback.
++            return "SpeedTreeRT.dll";
++        }
++
++        private static bool CanLoadWithSpeedTreeRt(string resource)
++        {
++            return resource.EndsWith(".spt", StringComparison.OrdinalIgnoreCase) ||
++                   resource.EndsWith(".ctree", StringComparison.OrdinalIgnoreCase);
++        }
++
++        private static Texture LoadSpeedTreeRtTexture(string rootDir, string resourceName, string materialOrTextureName, WoTPackageManager resMgr)
++        {
++            if (resMgr == null || string.IsNullOrEmpty(materialOrTextureName)) return null;
++            foreach (string candidate in SpeedTreeRtTextureCandidates(resourceName, materialOrTextureName))
++            {
++                byte[] bytes = resMgr.ReadBytes(candidate);
++                if (bytes == null) continue;
++                try
++                {
++                    Texture2D tex;
++                    if (bytes.Length >= 4 && BitConverter.ToUInt32(bytes, 0) == DdsDecoder.MAGIC)
++                    {
++                        try { tex = DdsDecoder.ReadDecompressed(bytes, Path.GetFileNameWithoutExtension(candidate), false, true); }
++                        catch { tex = DdsDecoder.Read(bytes, Path.GetFileNameWithoutExtension(candidate), false); }
++                    }
++                    else
++                    {
++                        tex = new Texture2D(2, 2, TextureFormat.RGBA32, false, false)
++                        {
++                            name = Path.GetFileNameWithoutExtension(candidate),
++                            wrapMode = TextureWrapMode.Repeat,
++                        };
++                        if (!tex.LoadImage(bytes, false))
++                        {
++                            UnityEngine.Object.DestroyImmediate(tex);
++                            continue;
++                        }
++                    }
++
++                    tex.name = SafeAssetName(PathName(candidate) + "_" + StableHash32(candidate).ToString("X8"));
++                    tex.wrapMode = TextureWrapMode.Repeat;
++                    tex.filterMode = FilterMode.Bilinear;
++                    string texPath = $"{rootDir}/Textures/{tex.name}.asset";
++                    SaveAsset(tex, texPath);
++                    return AssetDatabase.LoadAssetAtPath<Texture2D>(texPath) ?? tex;
++                }
++                catch { /* try next candidate */ }
++            }
++            return null;
++        }
++
++        private static IEnumerable<string> SpeedTreeRtTextureCandidates(string resourceName, string materialOrTextureName)
++        {
++            string tex = NormalizeResource(materialOrTextureName);
++            string resDir = Path.GetDirectoryName(NormalizeResource(resourceName))?.Replace('\\', '/') ?? string.Empty;
++            string noExt = RemoveExtension(tex);
++
++            // Names returned by old SpeedTreeRT are often *.tga while WoT packages
++            // contain the same texture as *.dds.  Try DDS first for Unity import.
++            foreach (string ext in new[] { ".dds", ".png", ".tga", ".jpg", ".jpeg" })
++            {
++                string c = noExt + ext;
++                yield return c;
++                if (!c.StartsWith("content/", StringComparison.OrdinalIgnoreCase)) yield return "content/" + c;
++                if (!string.IsNullOrEmpty(resDir) && c.IndexOf('/') < 0) yield return resDir + "/" + c;
++                if (!string.IsNullOrEmpty(resDir) && c.IndexOf('/') < 0) yield return "content/" + resDir + "/" + c;
++            }
++
++            yield return tex;
++            if (!tex.StartsWith("content/", StringComparison.OrdinalIgnoreCase)) yield return "content/" + tex;
++        }
++
+         private static uint StableHash32(string s) { unchecked { uint h = 2166136261u; if (s == null) return h; foreach (char c in s) { h ^= (uint)char.ToLowerInvariant(c); h *= 16777619u; } return h; } }
+ 
+         private static void SaveAsset(UnityEngine.Object obj, string path)
+@@ -489,6 +586,8 @@ namespace WoTMapImporter.Editor.Vegetation
+             string baseNoExt = RemoveExtension(n);
+ 
+             yield return baseNoExt + ".srt";
++            yield return baseNoExt + ".ctree";
++            yield return baseNoExt + ".spt";
+             yield return baseNoExt + ".fbx";
+             yield return baseNoExt + ".prefab";
+             yield return baseNoExt + ".st";
+@@ -499,6 +598,8 @@ namespace WoTMapImporter.Editor.Vegetation
+             {
+                 string cn = "content/" + baseNoExt;
+                 yield return cn + ".srt";
++                yield return cn + ".ctree";
++                yield return cn + ".spt";
+                 yield return cn + ".fbx";
+                 yield return cn + ".prefab";
+                 yield return cn + ".st";
