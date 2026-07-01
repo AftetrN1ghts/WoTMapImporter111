@@ -38,6 +38,9 @@ namespace WoTMapImporter.Editor
         private int _terrainBakeResolution = 2048;
         private bool _terrainLiveSplat = false;
         private float _terrainAOStrength = 0.5f;
+        private bool _loadLighting = true;
+        private bool _useMapStartTime = true;
+        private float _timeOfDay = 12f;
         private WoTMapImporter.TerrainImportMode _terrainMode = WoTMapImporter.TerrainImportMode.MeshChunks;
         private bool _mapsParsed;
         private Vector2 _scroll;
@@ -70,6 +73,9 @@ namespace WoTMapImporter.Editor
             _terrainBakeResolution = EditorPrefs.GetInt("WoTMapImporter.terrainBakeResolution", _terrainBakeResolution);
             _terrainLiveSplat = EditorPrefs.GetBool("WoTMapImporter.terrainLiveSplat2", _terrainLiveSplat);
             _terrainAOStrength = EditorPrefs.GetFloat("WoTMapImporter.terrainAOStrength", _terrainAOStrength);
+            _loadLighting = EditorPrefs.GetBool("WoTMapImporter.loadLighting", _loadLighting);
+            _useMapStartTime = EditorPrefs.GetBool("WoTMapImporter.useMapStartTime", _useMapStartTime);
+            _timeOfDay = EditorPrefs.GetFloat("WoTMapImporter.timeOfDay", _timeOfDay);
         }
 
         private void OnDisable()
@@ -87,6 +93,9 @@ namespace WoTMapImporter.Editor
             EditorPrefs.SetInt("WoTMapImporter.terrainBakeResolution", _terrainBakeResolution);
             EditorPrefs.SetBool("WoTMapImporter.terrainLiveSplat2", _terrainLiveSplat);
             EditorPrefs.SetFloat("WoTMapImporter.terrainAOStrength", _terrainAOStrength);
+            EditorPrefs.SetBool("WoTMapImporter.loadLighting", _loadLighting);
+            EditorPrefs.SetBool("WoTMapImporter.useMapStartTime", _useMapStartTime);
+            EditorPrefs.SetFloat("WoTMapImporter.timeOfDay", _timeOfDay);
         }
 
         private void OnGUI()
@@ -170,6 +179,19 @@ namespace WoTMapImporter.Editor
                 EditorGUILayout.HelpBox("Terrain import is disabled. The importer will still load space.bin static objects if 'Load static objects' is enabled.", MessageType.Info);
             else if (_terrainMode == WoTMapImporter.TerrainImportMode.MeshChunks)
                 EditorGUILayout.HelpBox("MeshChunks uses one MeshRenderer per WoT .cdata chunk and samples original blend textures without Unity Terrain alphamap normalization.", MessageType.Info);
+
+            EditorGUILayout.Space();
+            _loadLighting = EditorGUILayout.Toggle("Import lighting + skybox", _loadLighting);
+            using (new EditorGUI.DisabledScope(!_loadLighting))
+            {
+                _useMapStartTime = EditorGUILayout.Toggle("Use map's own time of day", _useMapStartTime);
+                using (new EditorGUI.DisabledScope(_useMapStartTime))
+                {
+                    _timeOfDay = EditorGUILayout.Slider("Time of day (hour)", _timeOfDay, 0f, 24f);
+                }
+            }
+            if (_loadLighting)
+                EditorGUILayout.HelpBox("Imports the map's original sun, ambient, height-fog and skybox from its day/night cycle. Drag the time-of-day slider to pick the hour (00-24).", MessageType.Info);
         }
 
         private void DrawParseSection()
@@ -374,6 +396,8 @@ namespace WoTMapImporter.Editor
                     TerrainLiveSplat = _terrainLiveSplat,
                     TerrainAOStrength = _terrainAOStrength,
                     TerrainMode = _terrainMode,
+                    LoadLighting = _loadLighting,
+                    TimeOfDay = _useMapStartTime ? -1f : _timeOfDay,
                 };
 
                 EditorUtility.DisplayProgressBar("WoT Map Importer", "Starting import...", 0f);
