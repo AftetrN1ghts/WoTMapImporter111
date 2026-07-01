@@ -103,8 +103,13 @@ namespace WoTMapImporter.Editor.Vegetation
                 ApplyWoTTransform(inst.transform, tree.Transform);
                 ApplyTreeRenderFlags(inst, tree);
                 RemoveTreeColliders(inst);
-                if (!tree.AlwaysDynamic)
-                    GameObjectUtility.SetStaticEditorFlags(inst, StaticEditorFlags.BatchingStatic);
+
+                // Do not force static batching: all instances of a species share the
+                // same mesh+material, so GPU instancing (enabled on the materials)
+                // draws them from a single shared mesh instead of duplicating combined
+                // geometry into the scene, which is far smaller on disk/in memory.
+                GameObjectUtility.SetStaticEditorFlags(inst,
+                    GameObjectUtility.GetStaticEditorFlags(inst) & ~StaticEditorFlags.BatchingStatic);
 
                 ctx.Result.CreatedObjects.Add(inst);
                 placed++;

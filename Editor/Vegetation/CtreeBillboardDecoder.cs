@@ -74,6 +74,7 @@ namespace WoTMapImporter.Editor.Vegetation
                 var mat = new Material(shader)
                 {
                     name = SafeAssetName(baseName + "_ctree_billboard_" + PathName(usedTextureName)),
+                    enableInstancing = true,
                     doubleSidedGI = true,
                 };
                 if (tex != null)

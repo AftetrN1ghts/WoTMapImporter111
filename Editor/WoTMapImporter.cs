@@ -41,6 +41,8 @@ namespace WoTMapImporter.Editor
             public bool LoadVegetation = true;
             public bool LoadFlora = true;
             public float FloraDensity = 0.25f;
+            public bool FloraGpuInstancing = true;
+            public float FloraDrawDistance = 250f;
             public bool LoadNormals = true;
             public bool LoadWetness = false;
             public int MaxHeightmapResolution = 4097;
@@ -200,7 +202,12 @@ namespace WoTMapImporter.Editor
                         progress?.Invoke(0.98f, "Scattering ground flora...");
                         var floraResult = Vegetation.FloraScatterBuilder.Build(
                             folder, spaceName, universalTerrain, chunks, pkgMgr,
-                            new Vegetation.FloraScatterBuilder.Settings { Density = settings.FloraDensity });
+                            new Vegetation.FloraScatterBuilder.Settings
+                            {
+                                Density = settings.FloraDensity,
+                                UseGpuInstancing = settings.FloraGpuInstancing,
+                                MaxDrawDistance = settings.FloraDrawDistance,
+                            });
                         result.Warnings.AddRange(floraResult.Warnings);
                         if (floraResult.Root != null)
                             floraResult.Root.transform.SetParent(root.transform, false);

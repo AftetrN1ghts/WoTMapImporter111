@@ -184,7 +184,7 @@ namespace WoTMapImporter.Editor.Vegetation
         {
             Texture2D tex = LoadNearbyTexture(rootDir, speedTreeResource, primitiveResource, resMgr, warnings);
             Shader shader = Shader.Find("WoT/ObjectPBS") ?? Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard") ?? Shader.Find("Sprites/Default");
-            var mat = new Material(shader) { name = SafeAssetName(PathName(speedTreeResource) + "_flora_mat") };
+            var mat = new Material(shader) { name = SafeAssetName(PathName(speedTreeResource) + "_flora_mat"), enableInstancing = true };
             if (tex != null)
             {
                 SetTextureIfExists(mat, "_BaseMap", tex);
