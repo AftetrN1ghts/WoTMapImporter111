@@ -50,6 +50,9 @@ namespace WoTMapImporter.Editor
             // Mesh terrain: blend the original WoT tiles live in the shader (sharp,
             // tiny on disk) instead of baking a big per-chunk albedo texture.
             public bool TerrainLiveSplat = true;
+            // Strength of the per-chunk baked ambient occlusion applied to mesh
+            // terrain (relief detail). 0 = off, 1 = full.
+            public float TerrainAOStrength = 1f;
             public TerrainImportMode TerrainMode = TerrainImportMode.MeshChunks;
         }
 
@@ -148,7 +151,8 @@ namespace WoTMapImporter.Editor
                     {
                         var meshResult = TerrainMeshBuilder.Build(folder, mapInfo, universalTerrain, chunks, pkgMgr,
                                                                   settings.LoadWetness, settings.LoadNormals,
-                                                                  settings.TerrainBakeResolution, settings.TerrainLiveSplat);
+                                                                  settings.TerrainBakeResolution, settings.TerrainLiveSplat,
+                                                                  settings.TerrainAOStrength);
                         terrainObject = meshResult.TerrainObject;
                         result.Warnings.AddRange(meshResult.Warnings);
                     }

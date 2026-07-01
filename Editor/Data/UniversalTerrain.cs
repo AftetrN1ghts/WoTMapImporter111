@@ -43,6 +43,7 @@ namespace WoTMapImporter.Editor.Data
         public Vector2 ChunkPos;        // world position (metres)
         public Texture2D HeightsTex;    // PNG with encoded height in RGB channels
         public Texture2D NormalsTex;    // PNG/DDS normals (may be null)
+        public Texture2D AoTex;         // per-chunk baked ambient occlusion (may be null)
         public List<Texture2D> BlendTextures;  // new format: DXT5 DDS blend maps (R/G/B/A = weights)
         public List<TerrainLayerDef> Layers;
         public bool IsNewBlendFormat;

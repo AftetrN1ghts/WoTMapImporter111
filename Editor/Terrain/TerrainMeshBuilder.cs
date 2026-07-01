@@ -42,7 +42,8 @@ namespace WoTMapImporter.Editor.Terrain
             bool loadWetness,
             bool loadNormals = true,
             int bakeResolution = 2048,
-            bool liveSplat = true)
+            bool liveSplat = true,
+            float aoStrength = 1f)
         {
             // Keep the baked albedo a sane power-of-two; guards against silly UI values.
             bakeResolution = Mathf.Clamp(Mathf.ClosestPowerOfTwo(bakeResolution), 512, 4096);
@@ -125,7 +126,7 @@ namespace WoTMapImporter.Editor.Terrain
 
                     Material mat = liveSplat
                         ? BuildChunkMaterial(shader, outputPath, mapInfo.Name, terrain, chunk, resMgr, globalMap,
-                                             uvMinX, uvMaxX, uvMinY, uvMaxY, loadNormals)
+                                             uvMinX, uvMaxX, uvMinY, uvMaxY, loadNormals, aoStrength)
                         : BuildBakedChunkMaterial(shader, outputPath, mapInfo.Name, terrain, chunk, resMgr, globalMap,
                                              uvMinX, uvMaxX, uvMinY, uvMaxY, loadNormals, bakeResolution);
 
@@ -328,6 +329,35 @@ namespace WoTMapImporter.Editor.Terrain
             };
             tex.SetPixels32(src.GetPixels32());
             tex.Apply(true, false);
+
+            string path = outputPath + "/BakedChunks/" + tex.name + ".asset";
+            SaveAsset(tex, path);
+            return AssetDatabase.LoadAssetAtPath<Texture2D>(path) ?? tex;
+        }
+
+        // Per-chunk AO: small (usually 256²) grayscale relief map. Mip-chained and
+        // DXT1-compressed so 100 chunks cost a few MB instead of tens of MB.
+        private static Texture2D PersistChunkAo(Texture2D src, string outputPath, string mapName, string chunkName)
+        {
+            if (src == null) return null;
+
+            var tex = new Texture2D(src.width, src.height, TextureFormat.RGBA32, true, true)
+            {
+                name = SafeAssetName(mapName + "_" + chunkName + "_ao"),
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+            };
+            tex.SetPixels32(src.GetPixels32());
+            tex.Apply(true, false);
+            if ((tex.width & 3) == 0 && (tex.height & 3) == 0 && tex.width >= 4 && tex.height >= 4)
+            {
+                try
+                {
+                    EditorUtility.CompressTexture(tex, TextureFormat.DXT1, TextureCompressionQuality.Normal);
+                    tex.Apply(false, false);
+                }
+                catch (Exception e) { WoTLogger.Warn($"AO compression failed ({chunkName}): {e.Message}"); }
+            }
 
             string path = outputPath + "/BakedChunks/" + tex.name + ".asset";
             SaveAsset(tex, path);
@@ -661,7 +691,8 @@ namespace WoTMapImporter.Editor.Terrain
             int uvMaxX,
             int uvMinY,
             int uvMaxY,
-            bool loadNormals)
+            bool loadNormals,
+            float aoStrength)
         {
             Material mat;
             if (shader != null)
@@ -790,6 +821,20 @@ namespace WoTMapImporter.Editor.Terrain
                 mat.SetFloat("_UseGlobalMap", 0f);
             }
 
+            // Per-chunk baked ambient occlusion: WoT's terrain relief detail. Applied
+            // as an albedo multiplier in the shader; the single biggest quality gain.
+            var ao = PersistChunkAo(chunk.AoTex, outputPath, mapName, chunk.ChunkName);
+            if (ao != null)
+            {
+                mat.SetTexture("_AO", ao);
+                mat.SetFloat("_UseAO", 1f);
+                mat.SetFloat("_AOStrength", aoStrength);
+            }
+            else
+            {
+                mat.SetFloat("_UseAO", 0f);
+            }
+
             string matPath = outputPath + "/Materials/" + mat.name + ".mat";
             SaveAsset(mat, matPath);
             var persistedMat = AssetDatabase.LoadAssetAtPath<Material>(matPath) ?? mat;
@@ -839,6 +884,36 @@ namespace WoTMapImporter.Editor.Terrain
             return new Vector4(rotRad, 0f, sx, sy);
         }
 
+        // Rebuild a decoded tile with a full mip chain (sharp at distance, no
+        // shimmer) and GPU block-compress it (major on-disk saving). Shared/deduped
+        // across all chunks via _globalTextureCache, so it is compressed only once.
+        private static Texture2D BuildSharedTile(Texture2D src, bool linear)
+        {
+            int w = src.width, h = src.height;
+            var pix = src.GetPixels32();
+            var t = new Texture2D(w, h, TextureFormat.RGBA32, true, linear);
+            t.SetPixels32(pix);
+            t.Apply(true, false);
+
+            // Block compression needs multiple-of-4 dimensions. Normal maps keep RGB
+            // via DXT5 (alpha≈1 → URP's UnpackNormalmapRGorAG picks the RGB path);
+            // diffuse tiles drop the unused alpha with DXT1.
+            if ((w & 3) == 0 && (h & 3) == 0 && w >= 4 && h >= 4)
+            {
+                var fmt = linear ? TextureFormat.DXT5 : TextureFormat.DXT1;
+                try
+                {
+                    EditorUtility.CompressTexture(t, fmt, TextureCompressionQuality.Normal);
+                    t.Apply(false, false);
+                }
+                catch (Exception e)
+                {
+                    WoTLogger.Warn($"Tile compression failed ({src.name}): {e.Message}");
+                }
+            }
+            return t;
+        }
+
         private static Texture2D LoadLayerTexture(
             WoTPackageManager resMgr,
             string outputPath,
@@ -857,11 +932,16 @@ namespace WoTMapImporter.Editor.Terrain
             byte[] data = resMgr.ReadBytes(textureName) ?? TryAlternatePaths(resMgr, textureName);
             if (data == null) return null;
 
-            Texture2D tex = LoadTexture(data, textureName, linear, readable);
-            if (tex == null) return null;
+            // Force readable so we can rebuild the tile with a full mip chain and
+            // GPU-block compress it (huge disk win: e.g. a 4096² RGBA32 color_tex
+            // asset drops from ~64 MB to ~8-16 MB).
+            Texture2D src = LoadTexture(data, textureName, linear, true);
+            if (src == null) return null;
 
+            Texture2D tex = BuildSharedTile(src, linear);
             tex.wrapMode = TextureWrapMode.Repeat;
-            tex.filterMode = FilterMode.Bilinear;
+            tex.filterMode = FilterMode.Trilinear;
+            tex.anisoLevel = 8;
             tex.name = SafeAssetName(mapName + "_global_layer_" + Path.GetFileNameWithoutExtension(textureName));
 
             string path = outputPath + "/Textures/" + tex.name + ".asset";
