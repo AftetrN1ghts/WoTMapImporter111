@@ -12,23 +12,28 @@ using WoTMapImporter.Editor.Utils;
 namespace WoTMapImporter.Editor.Vegetation
 {
     /// <summary>
-    /// Best-effort decoder for old BigWorld/WoT 0.8.x compiled SpeedTree (*.ctree) files.
+    /// Decoder for old BigWorld/WoT 0.8.x compiled SpeedTree (*.ctree) files.
     ///
     /// Important: *.spt is a procedural SpeedTree source file.  Without the original
     /// SpeedTreeRT DLL/modeler it cannot be deterministically evaluated into triangles.
-    /// WoT 0.8.x ships an already compiled companion file (*.ctree); this decoder scans
-    /// that file for the common runtime geometry blocks seen in 0.8.x clients:
+    /// WoT 0.8.x ships an already compiled companion file (*.ctree) which this decoder
+    /// parses directly.  The confirmed 0.8.10 container layout is:
     ///
-    ///   u32 vertexCount
-    ///   6 * f32 bbox-ish data
-    ///   2 * f32 lod/alpha-ish data
-    ///   u32 indexCount
-    ///   vertexCount * 52 bytes   (uv/wind, normal, position, tangent)
-    ///   indexCount * u16         (triangle strip indices, degenerate breaks allowed)
+    ///   file header (36 bytes): u32 + 6*f32 bbox + 2*f32 lod/wind
+    ///   repeated render groups, each:
+    ///     u32 vertexCount
+    ///     vertexCount * vertex           (branch/frond stride 52, leaf-card stride 88)
+    ///     u32 stripCount
+    ///     stripCount * (u32 len + len*u32 indices)   (LOD triangle strips)
+    ///     length-prefixed diffuse + normal texture names
     ///
-    /// The exact format was never public and small game builds can differ, so the
-    /// decoder is intentionally heuristic.  Unsupported blocks are skipped and the
-    /// caller can still fall back to a placeholder.
+    ///   branch/frond vertex (stride 52): position@0, uv@24, normal@40 (unit)
+    ///   leaf-card vertex   (stride 88): 4 corners per card sharing center@0,
+    ///                                   uv@24, per-corner normal@12, half-size@48,
+    ///                                   corner index (0..3)@60
+    ///
+    /// If a file does not match this deterministic layout the decoder falls back to the
+    /// legacy heuristic block scan.
     /// </summary>
     public static class CtreeMeshDecoder
     {
@@ -37,6 +42,21 @@ namespace WoTMapImporter.Editor.Vegetation
         private const int DefaultNormalOffset = 16;
         private const int DefaultUOffset = 0;
         private const int DefaultVOffset = 8;
+
+        // Deterministic 0.8.x container layout.
+        private const int FileHeaderSize = 36;
+        private const int StrideBranch = 52;
+        private const int StrideLeafCard = 88;
+        private const int BranchPositionOffset = 0;
+        private const int BranchUvOffset = 24;
+        private const int BranchNormalOffset = 40;
+        private const int LeafCenterOffset = 0;
+        private const int LeafUvOffset = 24;
+        private const int LeafNormalOffset = 12;
+        private const int LeafHalfSizeOffset = 48;
+        private const int LeafCornerIndexOffset = 60;
+        private static readonly float[] LeafCornerSignX = { 1f, -1f, -1f, 1f };
+        private static readonly float[] LeafCornerSignY = { -1f, -1f, 1f, 1f };
         private static readonly bool EnableExperimentalCtreeMeshes = true;
         // CTREE meshes are local tree/bush meshes.  Anything beyond this is almost
         // certainly a false-positive block/stride and will break Unity AABBs.
@@ -140,6 +160,12 @@ namespace WoTMapImporter.Editor.Vegetation
         private static DecodedCtree Decode(byte[] data)
         {
             if (data == null || data.Length < 128) return null;
+
+            // Preferred path: deterministic parse of the known 0.8.x container layout.
+            var structured = TryDecodeStructured(data);
+            if (structured != null && structured.Meshes.Count > 0)
+                return structured;
+
             var ctree = new DecodedCtree();
             ctree.Strings.AddRange(FindLengthPrefixedStrings(data, stopAfter: 4096));
 
@@ -155,6 +181,267 @@ namespace WoTMapImporter.Editor.Vegetation
                 ctree.Meshes.Add(part);
             }
             return ctree;
+        }
+
+        // ---- Deterministic 0.8.x container parser ----------------------------------
+
+        private static DecodedCtree TryDecodeStructured(byte[] data)
+        {
+            if (data == null || data.Length < FileHeaderSize + 16) return null;
+
+            var ctree = new DecodedCtree();
+            ctree.Strings.AddRange(FindLengthPrefixedStrings(data, stopAfter: 4096));
+
+            int o = FileHeaderSize;
+            int guard = 0;
+            while (o + 4 <= data.Length && guard++ < 8192)
+            {
+                if (!TryParseGroup(data, o, out MeshPart part, out int next))
+                {
+                    // Trailing collision/billboard/LOD data or unknown material params:
+                    // try to resync to the next valid group before giving up.
+                    int resync = ResyncToNextGroup(data, o + 4);
+                    if (resync < 0) break;
+                    o = resync;
+                    continue;
+                }
+                if (part != null) ctree.Meshes.Add(part);
+                if (next <= o) break;
+                o = next;
+            }
+
+            return ctree.Meshes.Count > 0 ? ctree : null;
+        }
+
+        private static int ResyncToNextGroup(byte[] data, int from)
+        {
+            int limit = Math.Min(data.Length - 4, from + 2048);
+            for (int o = Align4(from); o <= limit; o += 4)
+                if (TryParseGroup(data, o, out _, out _)) return o;
+            return -1;
+        }
+
+        private static bool TryParseGroup(byte[] data, int off, out MeshPart part, out int next)
+        {
+            part = null;
+            next = off;
+            int vcount = unchecked((int)ReadUInt32(data, off));
+            if (vcount < 3 || vcount > 500000) return false;
+            int vb = off + 4;
+
+            foreach (int stride in new[] { StrideBranch, StrideLeafCard })
+            {
+                long vertsEnd = (long)vb + (long)vcount * stride;
+                if (vertsEnd + 4 > data.Length) continue;
+                if (!VerticesMatchStride(data, vb, vcount, stride)) continue;
+                if (!TryParseStrips(data, (int)vertsEnd, vcount, out int stripOff, out int stripLen, out int stripsEnd))
+                    continue;
+
+                int q = stripsEnd;
+                var texs = new List<string>();
+                while (true)
+                {
+                    string s = TryReadLengthPrefixedString(data, q, out int nq);
+                    if (s == null) break;
+                    texs.Add(s);
+                    q = nq;
+                }
+
+                MeshPart p = stride == StrideLeafCard
+                    ? BuildLeafCardPart(data, off, vb, vcount)
+                    : BuildStripMeshPart(data, off, vb, vcount, stride, stripOff, stripLen);
+                if (p == null) continue;
+
+                p.TextureName = PickDiffuse(texs);
+                part = p;
+                next = q;
+                return true;
+            }
+            return false;
+        }
+
+        private static bool VerticesMatchStride(byte[] data, int vb, int vcount, int stride)
+        {
+            int n = Math.Min(vcount, 16);
+            if (stride == StrideBranch)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    int b = vb + i * stride;
+                    if (!IsFiniteVector(ReadVector3(data, b + BranchPositionOffset))) return false;
+                    float m = ReadVector3(data, b + BranchNormalOffset).sqrMagnitude;
+                    if (!(m > 0.8f && m < 1.2f)) return false;
+                }
+                return true;
+            }
+            if (stride == StrideLeafCard)
+            {
+                if (vcount % 4 != 0) return false;
+                for (int i = 0; i < n; i++)
+                {
+                    int ci = Mathf.RoundToInt(ReadSingle(data, vb + i * stride + LeafCornerIndexOffset));
+                    if (ci != (i & 3)) return false;
+                }
+                return true;
+            }
+            return false;
+        }
+
+        private static bool TryParseStrips(byte[] data, int off, int vcount, out int firstStripOff, out int firstStripLen, out int end)
+        {
+            firstStripOff = 0;
+            firstStripLen = 0;
+            end = off;
+            if (off + 4 > data.Length) return false;
+            int count = unchecked((int)ReadUInt32(data, off));
+            if (count < 1 || count > 64) return false;
+
+            int p = off + 4;
+            for (int i = 0; i < count; i++)
+            {
+                if (p + 4 > data.Length) return false;
+                int len = unchecked((int)ReadUInt32(data, p));
+                if (len < 1 || len > 2000000 || (long)p + 4 + (long)len * 4 > data.Length) return false;
+                if (i == 0) { firstStripOff = p + 4; firstStripLen = len; }
+                p = p + 4 + len * 4;
+            }
+
+            int sample = Math.Min(firstStripLen, 64);
+            for (int i = 0; i < sample; i++)
+                if (unchecked((int)ReadUInt32(data, firstStripOff + i * 4)) >= vcount) return false;
+
+            end = p;
+            return true;
+        }
+
+        private static MeshPart BuildStripMeshPart(byte[] data, int headerOff, int vb, int vcount, int stride, int stripOff, int stripLen)
+        {
+            var positions = new Vector3[vcount];
+            var normals = new Vector3[vcount];
+            var uvs = new Vector2[vcount];
+            for (int i = 0; i < vcount; i++)
+            {
+                int b = vb + i * stride;
+                Vector3 p = ReadVector3(data, b + BranchPositionOffset);
+                Vector3 n = ReadVector3(data, b + BranchNormalOffset);
+                if (!IsFiniteVector(n) || n.sqrMagnitude < 1e-8f) n = Vector3.up;
+                float u = ReadSingle(data, b + BranchUvOffset);
+                float v = ReadSingle(data, b + BranchUvOffset + 4);
+                if (!IsFinite(u)) u = 0f;
+                if (!IsFinite(v)) v = 0f;
+
+                positions[i] = new Vector3(p.x, p.z, p.y);
+                normals[i] = new Vector3(n.x, n.z, n.y).normalized;
+                uvs[i] = new Vector2(u, 1f - v);
+            }
+
+            // Only the first (highest-detail) strip is used; the remaining strips are LODs.
+            var strip = new int[stripLen];
+            for (int i = 0; i < stripLen; i++)
+                strip[i] = unchecked((int)ReadUInt32(data, stripOff + i * 4));
+
+            int[] triangles = TriangleStripToList(strip, vcount);
+            triangles = FilterInvalidGeometryTriangles(triangles, positions);
+            if (triangles.Length == 0) return null;
+            if (!SanitizeVerticesForUnityBounds(positions, triangles)) return null;
+            if (NeedsWindingFlip(positions, normals, triangles)) SwapTriangleWinding(triangles);
+
+            return new MeshPart
+            {
+                SourceOffset = headerOff,
+                Positions = positions,
+                Normals = normals,
+                Uv = uvs,
+                Indices = triangles,
+            };
+        }
+
+        private static MeshPart BuildLeafCardPart(byte[] data, int headerOff, int vb, int vcount)
+        {
+            int cards = vcount / 4;
+            var positions = new Vector3[vcount];
+            var normals = new Vector3[vcount];
+            var uvs = new Vector2[vcount];
+            var triangles = new List<int>(cards * 6);
+
+            for (int c = 0; c < cards; c++)
+            {
+                int baseIdx = c * 4;
+                Vector3 center = ReadVector3(data, vb + baseIdx * StrideLeafCard + LeafCenterOffset);
+
+                Vector3 normal = Vector3.zero;
+                for (int k = 0; k < 4; k++)
+                    normal += ReadVector3(data, vb + (baseIdx + k) * StrideLeafCard + LeafNormalOffset);
+                if (!IsFiniteVector(normal) || normal.sqrMagnitude < 1e-8f) normal = Vector3.up;
+                normal.Normalize();
+
+                Vector3 right = Vector3.Cross(Vector3.up, normal);
+                if (right.sqrMagnitude < 1e-8f) right = Vector3.right;
+                right.Normalize();
+                Vector3 up = Vector3.Cross(normal, right).normalized;
+
+                for (int k = 0; k < 4; k++)
+                {
+                    int b = vb + (baseIdx + k) * StrideLeafCard;
+                    float half = ReadSingle(data, b + LeafHalfSizeOffset) * 0.5f;
+                    if (!IsFinite(half) || half <= 0f) half = 0.25f;
+                    int ci = Mathf.RoundToInt(ReadSingle(data, b + LeafCornerIndexOffset)) & 3;
+                    Vector3 corner = center + right * (LeafCornerSignX[ci] * half) + up * (LeafCornerSignY[ci] * half);
+
+                    float u = ReadSingle(data, b + LeafUvOffset);
+                    float v = ReadSingle(data, b + LeafUvOffset + 4);
+                    if (!IsFinite(u)) u = 0f;
+                    if (!IsFinite(v)) v = 0f;
+
+                    int vi = baseIdx + k;
+                    positions[vi] = new Vector3(corner.x, corner.z, corner.y);
+                    normals[vi] = new Vector3(normal.x, normal.z, normal.y);
+                    uvs[vi] = new Vector2(u, 1f - v);
+                }
+
+                triangles.Add(baseIdx + 0); triangles.Add(baseIdx + 1); triangles.Add(baseIdx + 2);
+                triangles.Add(baseIdx + 0); triangles.Add(baseIdx + 2); triangles.Add(baseIdx + 3);
+            }
+
+            int[] tris = FilterInvalidGeometryTriangles(triangles.ToArray(), positions);
+            if (tris.Length == 0) return null;
+            if (!SanitizeVerticesForUnityBounds(positions, tris)) return null;
+
+            return new MeshPart
+            {
+                SourceOffset = headerOff,
+                Positions = positions,
+                Normals = normals,
+                Uv = uvs,
+                Indices = tris,
+            };
+        }
+
+        private static string PickDiffuse(List<string> texs)
+        {
+            if (texs == null || texs.Count == 0) return null;
+            foreach (string t in texs)
+                if (IsLikelyDiffuse(t)) return t;
+            return texs[0];
+        }
+
+        private static string TryReadLengthPrefixedString(byte[] data, int off, out int next)
+        {
+            next = off;
+            if (off + 4 > data.Length) return null;
+            int len = unchecked((int)ReadUInt32(data, off));
+            if (len <= 0 || len > 512 || off + 4 + len > data.Length) return null;
+            if (!LooksAscii(data, off + 4, len)) return null;
+
+            int actual = len;
+            while (actual > 0 && data[off + 4 + actual - 1] == 0) actual--;
+            if (actual <= 0) return null;
+
+            string s = CleanResourcePath(Encoding.UTF8.GetString(data, off + 4, actual));
+            if (string.IsNullOrEmpty(s)) return null;
+
+            next = off + 4 + len;
+            return s;
         }
 
         private static MeshPart DecodeMeshPart(byte[] data, MeshCandidate c)
